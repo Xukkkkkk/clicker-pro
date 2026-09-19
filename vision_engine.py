@@ -652,6 +652,7 @@ class _PreparedTemplate:
     width: int
     height: int
     preferred_scale: float = 1.0
+    scale_cursor: int = 0
 
 
 class VisionEngine:
@@ -682,6 +683,7 @@ class VisionEngine:
         on_done: Optional[Callable[[], None]] = None,
         prefer_mss: bool = True,
         exclude_regions: Optional[Callable[[], Sequence[Region]]] = None,
+        immediate_click: bool = False,
     ):
         self.interval = max(0.01, float(interval))
         self.threshold = _validate_threshold(threshold)
@@ -699,7 +701,13 @@ class VisionEngine:
         self.on_done = on_done
         self.capturer = ScreenCapturer(prefer_mss=prefer_mss)
         self.exclude_regions = exclude_regions
+        self.immediate_click = bool(immediate_click)
         self.last_scan_details: list[dict[str, Any]] = []
+        self.last_scan_ms = 0.0
+        self.last_capture_ms = 0.0
+        self.last_dispatch_ms = 0.0
+        self._next_template = 0
+        self._scale_template = 0
 
         self._lock = threading.RLock()
         self._templates: list[TemplateSpec] = []
@@ -879,20 +887,48 @@ class VisionEngine:
     def scan_once(self, *, trigger: bool = True) -> list[VisionMatch]:
         """Capture and match all enabled templates once.
 
-        ``trigger=False`` is useful for a preview button: callbacks, cooldowns
-        and automatic clicking are skipped, while the returned matches remain
-        identical.
+        ``trigger=False`` always runs a full, read-only scan. Immediate mode
+        dispatches the first hit and recaptures before looking for another.
         """
+        scan_started = time.perf_counter()
         cv2, np = _optional_backends()
         self.last_error = None
         self.last_scan_details = []
         frame = self._capture()
+        self.last_capture_ms = (time.perf_counter() - scan_started) * 1000
         image = _as_bgr(frame.image, cv2, np)
         excluded = tuple(self.exclude_regions() or ()) if self.exclude_regions else ()
         matches: list[VisionMatch] = []
         with self._lock:
             templates = list(self._templates)
-        for index, spec in enumerate(templates):
+        immediate = self.immediate_click and trigger
+        ordered = list(enumerate(templates))
+        if immediate and ordered:
+            offset = self._next_template % len(ordered)
+            ordered = ordered[offset:] + ordered[:offset]
+        pending_scales = []
+
+        def make_matches(selected, spec, search_x, search_y):
+            now = time.time()
+            return [VisionMatch(
+                template_id=spec.key, template_name=spec.name or spec.key,
+                score=score, x=search_x + px, y=search_y + py,
+                width=tw, height=th, center_x=search_x + px + tw // 2,
+                center_y=search_y + py + th // 2, timestamp=now,
+                button=spec.button, threshold=spec.threshold,
+                actions=((TemplateAction("click", spec.button, count=1, interval=0),)
+                         if immediate else spec.action_plan),
+            ) for score, px, py, tw, th in selected]
+
+        def finish():
+            self.last_scan_ms = (time.perf_counter() - scan_started) * 1000
+            if trigger:
+                self._trigger(matches, templates)
+            return matches
+
+        for index, spec in ordered:
+            if self.stop_event is not None and self.stop_event.is_set():
+                break
             if not spec.enabled:
                 continue
             try:
@@ -921,32 +957,43 @@ class VisionEngine:
                 selected = self._match_scaled(
                     source, template_image, prepared, threshold,
                     search_x, search_y, excluded, detail, cv2, np,
+                    quick_only=immediate, maximum=1 if immediate else None,
                 )
-                now = time.time()
-                for score, px, py, tw, th in selected:
-                    abs_x, abs_y = search_x + px, search_y + py
-                    center_x = abs_x + tw // 2
-                    center_y = abs_y + th // 2
-                    matches.append(VisionMatch(
-                        template_id=spec.key,
-                        template_name=spec.name or spec.key,
-                        score=score,
-                        x=abs_x,
-                        y=abs_y,
-                        width=tw,
-                        height=th,
-                        center_x=center_x,
-                        center_y=center_y,
-                        timestamp=now,
-                        button=spec.button,
-                        threshold=threshold,
-                        actions=spec.action_plan,
-                    ))
+                matches.extend(make_matches(selected, spec, search_x, search_y))
+                if immediate:
+                    if matches:
+                        # Click before any absent/slow template is searched,
+                        # then recapture. Rotate priority to avoid starvation.
+                        self._next_template = index + 1
+                        return finish()
+                    pending_scales.append((index, spec, source, template_image,
+                                           prepared, threshold, search_x, search_y, detail))
             except Exception as exc:
                 self._report_error(exc)
-        if trigger:
-            self._trigger(matches, templates)
-        return matches
+        if immediate and pending_scales:
+            # Only one template gets a bounded scale-search slice per frame.
+            # Every other target gets another quick check on the next capture.
+            pending_scales.sort(key=lambda item: item[0])
+            index, spec, source, template_image, prepared, threshold, sx, sy, detail = (
+                pending_scales[self._scale_template % len(pending_scales)])
+            self._scale_template += 1
+            steps = [50, 30, 60, 20, 80] + [step for step in range(20, 81)
+                                           if step not in {50, 30, 60, 20, 80}]
+            cursor = prepared.scale_cursor
+            batch = [steps[(cursor + i) % len(steps)] for i in range(6)]
+            prepared.scale_cursor = (cursor + len(batch)) % len(steps)
+            try:
+                selected = self._match_scaled(
+                    source, template_image, prepared, threshold, sx, sy,
+                    excluded, detail, cv2, np, scale_steps=batch,
+                    skip_quick=True, maximum=1,
+                )
+                matches.extend(make_matches(selected, spec, sx, sy))
+                if matches:
+                    self._next_template = index + 1
+            except Exception as exc:
+                self._report_error(exc)
+        return finish()
 
     @staticmethod
     def _score_map(source, template, cv2, np):
@@ -969,10 +1016,12 @@ class VisionEngine:
                 scores[y0:y1, x0:x1] = -1.0
 
     def _match_scaled(self, source, template, prepared, threshold,
-                      origin_x, origin_y, excluded, detail, cv2, np):
+                      origin_x, origin_y, excluded, detail, cv2, np, *,
+                      quick_only=False, scale_steps=None, skip_quick=False,
+                      maximum=None):
         selected = []
         attempted = set()
-        maximum = max(1, int(prepared.spec.max_matches))
+        maximum = maximum or max(1, int(prepared.spec.max_matches))
         sh, sw = source.shape[:2]
         stop = self.stop_event
 
@@ -1008,10 +1057,11 @@ class VisionEngine:
                 if len(selected) >= maximum:
                     break
 
-        attempt(prepared.preferred_scale)
-        if len(selected) < maximum:
-            attempt(1.0)
-        if len(selected) >= maximum:
+        if not skip_quick:
+            attempt(prepared.preferred_scale)
+            if len(selected) < maximum:
+                attempt(1.0)
+        if quick_only or len(selected) >= maximum:
             return selected
 
         # Search 50%-200% in a small image, then verify only the three best
@@ -1025,7 +1075,7 @@ class VisionEngine:
         gray_template = self._to_gray(template, cv2)
         ranking = []
         sizes = set()
-        for step in range(20, 81):
+        for step in (scale_steps if scale_steps is not None else range(20, 81)):
             if stop is not None and stop.is_set():
                 break
             scale = step / 40.0
@@ -1042,11 +1092,13 @@ class VisionEngine:
                               for x, y, width, height in excluded]
             self._exclude_scores(scores, w, h, 0, 0, small_excluded)
             ranking.append((cv2.minMaxLoc(scores)[1], scale))
-        for _, scale in sorted(ranking, reverse=True)[:3]:
+        for rough_score, scale in sorted(ranking, reverse=True)[:3]:
+            if scale_steps is not None and rough_score < threshold * 0.75:
+                continue
             attempt(scale)
             if len(selected) >= maximum:
                 break
-        if not attempted:
+        if not attempted and (prepared.width * .5 > sw or prepared.height * .5 > sh):
             detail["reason"] = "模板比截图大，请检查目标窗口大小"
         elif float(np.max(np.std(source, axis=(0, 1)))) < 1:
             detail["reason"] = "截图为空白或纯色，请确认窗口未最小化且内容已显示"
@@ -1061,7 +1113,8 @@ class VisionEngine:
             return best["reason"]
         width, height = best["frame_size"]
         return (f"最高匹配度 {best['score']:.0%} / 阈值 {best['threshold']:.0%}"
-                f" · 缩放 {best['scale']:.0%} · 截图 {width}×{height}")
+                f" · 缩放 {best['scale']:.0%} · 截图 {width}×{height}"
+                f" · 本轮检测 {self.last_scan_ms:.0f} ms")
 
     def _capture(self) -> ScreenFrame:
         if self.capture_fn is None:
@@ -1122,30 +1175,21 @@ class VisionEngine:
 
     def _trigger(self, matches: list[VisionMatch],
                  templates: list[TemplateSpec]) -> None:
-        if self.on_scan:
-            try:
-                self.on_scan(list(matches))
-            except Exception as exc:
-                self._report_error(exc)
-        if self.on_cycle:
-            try:
-                self.on_cycle(list(matches))
-            except Exception as exc:
-                self._report_error(exc)
+        if not self.immediate_click:
+            self._notify_scan(matches)
         spec_by_key = {spec.key: spec for spec in templates}
         for match in matches:
+            if self.stop_event is not None and self.stop_event.is_set():
+                break
             spec = spec_by_key.get(match.template_id)
-            if spec is None or not self._cooldown_ready(match, spec):
+            if spec is None or (not self.immediate_click and not self._cooldown_ready(match, spec)):
                 continue
+            dispatch_started = time.perf_counter()
             if self.auto_click and spec.click:
                 try:
                     if self.click_fn:
                         self.click_fn(match)
                     else:
-                        # Preserve the exact three-argument call used by
-                        # older integrations for the ordinary one-click
-                        # case; custom ``click_at`` monkeypatches therefore
-                        # continue to work unchanged.
                         if (len(match.actions) == 1
                                 and match.actions[0].kind == "click"
                                 and match.actions[0].count == 1):
@@ -1156,13 +1200,26 @@ class VisionEngine:
                                           stop_event=self.stop_event)
                 except Exception as exc:
                     self._report_error(exc)
-                    # Keep the cooldown even when the OS click failed; this
-                    # avoids a tight loop of failing injections.
             if self.on_match:
                 try:
                     self.on_match(match)
                 except Exception as exc:
                     self._report_error(exc)
+            self.last_dispatch_ms = (time.perf_counter() - dispatch_started) * 1000
+        if self.immediate_click:
+            self._notify_scan(matches)
+
+    def _notify_scan(self, matches):
+        if self.on_scan:
+            try:
+                self.on_scan(list(matches))
+            except Exception as exc:
+                self._report_error(exc)
+        if self.on_cycle:
+            try:
+                self.on_cycle(list(matches))
+            except Exception as exc:
+                self._report_error(exc)
 
     def _cooldown_ready(self, match: VisionMatch, spec: TemplateSpec) -> bool:
         cooldown = max(0.0, float(spec.cooldown))
@@ -1197,6 +1254,11 @@ class VisionEngine:
                     self.scan_once(trigger=True)
                 except Exception as exc:
                     self._report_error(exc)
+                if self.immediate_click:
+                    # Yield to other threads; do not add the configured scan
+                    # interval after screenshot/matching work in this mode.
+                    stop.wait(0.001)
+                    continue
                 next_tick += self.interval
                 # A screen capture/template match can take longer than the
                 # requested interval (especially on a 4K desktop or when

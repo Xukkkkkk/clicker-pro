@@ -216,6 +216,7 @@ class ClickerApp:
         self.vision_generation = 0
         self._vision_test_running = False
         self._vision_diagnostic_at = 0.0
+        self._vision_match_log_at = 0.0
         self.vision_template_counter = 0
         self.vision_preview_image = None
         # Keep the decoded source image separately from the PhotoImage shown
@@ -589,10 +590,18 @@ class ClickerApp:
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(toolbar, text="扫描间隔", style="Muted.TLabel").pack(side="left")
         self.vision_scan_var = tk.StringVar(value="0.20")
-        ttk.Combobox(toolbar, textvariable=self.vision_scan_var, values=["0.05", "0.10", "0.20", "0.35", "0.50", "1.00"], state="readonly", width=7).pack(side="left", padx=(8, 4))
+        self.vision_scan_combo = ttk.Combobox(toolbar, textvariable=self.vision_scan_var, values=["0.05", "0.10", "0.20", "0.35", "0.50", "1.00"], state="readonly", width=7)
+        self.vision_scan_combo.pack(side="left", padx=(8, 4))
         ttk.Label(toolbar, text="秒", style="Muted.TLabel").pack(side="left")
         self.vision_global_status = tk.StringVar(value="待机")
         ttk.Label(toolbar, textvariable=self.vision_global_status, style="Count.TLabel").pack(side="right")
+        fast_bar = ttk.Frame(page, style="Card.TFrame", padding=(0, 6))
+        fast_bar.pack(fill="x", pady=(0, 10))
+        self.vision_immediate_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(fast_bar, text="命中立即点击", variable=self.vision_immediate_var,
+                        command=self.change_vision_immediate).pack(side="left")
+        ttk.Label(fast_bar, text="最快扫描 · 忽略冷却 · 每次命中单击（替代长按/等待等动作）",
+                  style="Hint.TLabel").pack(side="left", padx=(12, 0))
         # Keep the detailed message in a separate compact status bar.  It is
         # useful when a scan finds nothing or a template cannot be loaded,
         # while the toolbar status remains a short at-a-glance indicator.
@@ -1764,6 +1773,16 @@ class ClickerApp:
         else:
             self.start_vision()
 
+    def change_vision_immediate(self):
+        was_running = self.vision_running
+        if was_running or self._vision_test_running:
+            self.stop_vision()
+        self.vision_scan_combo.configure(
+            state="disabled" if self.vision_immediate_var.get() else "readonly")
+        self.save_config()
+        if was_running:
+            self.start_vision()
+
     def build_vision_specs(self):
         """Convert saved UI rows into validated engine templates."""
         specs = []
@@ -2028,6 +2047,8 @@ class ClickerApp:
         generation = self.vision_generation
         self._vision_test_running = False
         self._vision_diagnostic_at = 0.0
+        self._vision_match_log_at = 0.0
+        immediate = bool(self.vision_immediate_var.get())
         try:
             self.vision_engines = {}
             self.vision_background_targets = list(targets)
@@ -2036,6 +2057,7 @@ class ClickerApp:
                     hwnd = int(target["hwnd"])
                     engine = VisionEngine(
                         specs, interval=scan_interval, auto_click=False,
+                        immediate_click=immediate,
                         capture_fn=lambda _region=None, handle=hwnd: capture_window_client(handle),
                         on_match=lambda result, token=generation, item=target: self.on_vision_match(result, token, item),
                         on_error=lambda error, token=generation: self.on_vision_error(error, token),
@@ -2048,6 +2070,7 @@ class ClickerApp:
                     specs,
                     interval=scan_interval,
                     auto_click=False,
+                    immediate_click=immediate,
                     on_match=lambda result, token=generation: self.on_vision_match(result, token),
                     on_error=lambda error, token=generation: self.on_vision_error(error, token),
                     exclude_regions=self._vision_excluded_regions,
@@ -2075,7 +2098,8 @@ class ClickerApp:
             return
         self.vision_start_button.configure(text="■  停止识别")
         self.vision_global_status.set(
-            f"后台识别 · {len(targets)} 窗口" if background else f"识别中 · {len(specs)}"
+            ("立即点击 · " if immediate else "") +
+            (f"后台 {len(targets)} 窗口" if background else f"识别中 · {len(specs)}")
         )
         self.set_status("后台图片识别中" if background else "图片识别中", "success")
 
@@ -2173,6 +2197,7 @@ class ClickerApp:
                 click_fn = send_click
                 mouse_down_fn = send_mouse_down
                 mouse_up_fn = send_mouse_up
+            action_started = time.perf_counter()
             completed = execute_template_actions(
                 actions,
                 x=x, y=y,
@@ -2184,15 +2209,24 @@ class ClickerApp:
             ) if execute_template_actions is not None else 0
             name = getattr(result, "name", "目标图片")
             score = float(getattr(result, "score", 0.0))
-            self.safe_after(self.vision_match_ui, name, score, x, y, generation, completed)
+            action_ms = (time.perf_counter() - action_started) * 1000
+            now = time.monotonic()
+            # Avoid making fast clicks wait for Tk on every frame. Actual
+            # mouse input above remains on the recognition worker.
+            if now - self._vision_match_log_at >= 0.15:
+                self._vision_match_log_at = now
+                self.safe_after(self.vision_match_ui, name, score, x, y, generation, completed,
+                                engine.last_scan_ms, action_ms)
         except Exception as exc:
             self.safe_after(self.on_vision_error, str(exc), generation)
 
     def vision_match_ui(self, name: str, score: float, x: int, y: int,
-                        generation: Optional[int] = None, completed: int = 1):
+                        generation: Optional[int] = None, completed: int = 1,
+                        scan_ms: Optional[float] = None, action_ms: Optional[float] = None):
         if generation is not None and generation != self.vision_generation:
             return
-        self.vision_log_var.set(f"已执行 {completed} 次动作：{name} · 置信度 {score:.0%} · ({x}, {y})")
+        timing = f" · 检测 {scan_ms:.0f} ms / 执行 {action_ms:.0f} ms" if scan_ms is not None and action_ms is not None else ""
+        self.vision_log_var.set(f"已执行 {completed} 次动作：{name} · 置信度 {score:.0%} · ({x}, {y}){timing}")
         short_name = name if len(name) <= 12 else name[:12] + "…"
         self.vision_global_status.set(f"命中 · {short_name}")
 
@@ -2335,6 +2369,9 @@ class ClickerApp:
             self.speed_var.set(speed if speed in {"0.5x", "1.0x", "1.5x", "2.0x", "4.0x"} else "1.0x")
             self.loop_var.set(str(data.get("loops", self.loop_var.get())))
             self.vision_scan_var.set(str(data.get("vision_scan_interval", self.vision_scan_var.get())))
+            self.vision_immediate_var.set(bool(data.get("vision_immediate", False)))
+            self.vision_scan_combo.configure(
+                state="disabled" if self.vision_immediate_var.get() else "readonly")
             self.vision_background_var.set(bool(data.get("vision_background", False)))
         except (ValueError, TypeError, OverflowError, tk.TclError):
             pass
@@ -2467,6 +2504,7 @@ class ClickerApp:
             "record_background": self.record_background_var.get(),
             "speed": self.speed_var.get(), "loops": self.loop_var.get(),
             "vision_scan_interval": self.vision_scan_var.get(),
+            "vision_immediate": self.vision_immediate_var.get(),
             "vision_background": self.vision_background_var.get(),
             "vision_templates": [self._serialise_vision_item(item) for item in self.vision_templates],
             "toggle_hotkey": self.hotkey_specs.get("toggle", HOTKEY_DEFAULTS["toggle"]),
@@ -2576,6 +2614,8 @@ class ClickerApp:
         number("run_duration", 0, 86400 * 30)
         integer("loops", 0, 1000000)
         number("vision_scan_interval", 0.03, 60)
+        if "vision_immediate" in data and not isinstance(data["vision_immediate"], bool):
+            raise ValueError("立即点击设置必须是布尔值")
         for key, choices in {
             "button": {"左键", "右键", "中键"},
             "click_mode": {"单击", "双击"},

@@ -45,9 +45,11 @@ python main.py
 双击 `build.bat`，或执行：
 
 ```powershell
-python -m PyInstaller --clean --noconfirm ClickerPro.spec
+python build.py
 ```
 
-统一使用 `dist\ClickerPro.exe`，无需按主题或功能另存多个版本。后续打包直接更新这个文件；运行中的程序需先关闭。详细环境准备见 [BUILD.md](BUILD.md)。
+统一使用 `dist\ClickerPro.exe`，无需按主题或功能另存多个版本。打包时会自动结束正在运行的当前项目 EXE，再更新同一个文件；其他目录的同名程序不受影响。强制结束前请留意未保存的操作。详细环境准备见 [BUILD.md](BUILD.md)。
+
+如果自动结束后仍遇到 `WinError 5`，请检查文件只读属性、目录权限或安全软件占用。新版打包脚本会在失败时停止，不再误报“Build complete”。
 
 `.clickerprofile` 会打包图片模板并可跨电脑导入；`.json` 仍用于兼容旧版配置。

@@ -20,6 +20,6 @@ python main.py
 python -m PyInstaller --clean --noconfirm ClickerPro.spec
 ```
 
-The executable is written to `dist\ClickerPro.exe` and runs on Windows 10/11. User settings and image templates are stored in `%LOCALAPPDATA%\ClickerPro`, so they survive rebuilding or moving the executable. OpenCV, NumPy, Pillow and MSS are bundled for image recognition.
+Use `dist\ClickerPro.exe` as the single executable for all themes and features on Windows 10/11. Close it before rebuilding to update that same path. Dark/light themes can be switched in Settings and are saved automatically. User settings and image templates are stored in `%LOCALAPPDATA%\ClickerPro`, so they survive rebuilding or moving the executable. OpenCV, NumPy, Pillow and MSS are bundled for image recognition.
 
 The `.clickerprofile` export is a ZIP bundle containing `profile.json` and copied image assets, so recognition templates remain usable when the profile is moved to another computer. Plain `.json` exports remain supported for legacy configurations.

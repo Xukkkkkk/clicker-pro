@@ -17,7 +17,9 @@ from pathlib import Path, PurePosixPath
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable, Optional
 
-from theme import COLORS, configure_theme, enable_dark_title_bar
+from theme import (COLORS, THEMES, bind_theme, configure_theme,
+                   enable_dark_title_bar, normalise_theme, refresh_theme_widgets)
+from ui_assets import Tooltip, symbol_image
 
 try:
     from pynput import keyboard, mouse
@@ -82,12 +84,14 @@ HOTKEY_DEFAULTS = {
     "record": "<f7>",
     "stop": "<f8>",
     "pause": "<f9>",
+    "play": "<f10>",
 }
 HOTKEY_LABELS = {
     "toggle": "开始 / 停止连点",
     "record": "开始 / 停止录制",
     "stop": "停止全部任务",
     "pause": "暂停 / 继续连点",
+    "play": "开始 / 停止回放",
 }
 
 
@@ -139,19 +143,25 @@ class ClickerApp:
         self.root.title("Clicker Pro")
         # Keep a comfortable default while the recognition editor provides its
         # own scrolling area for the larger preview and action plan.
-        self.root.geometry("1000x680")
+        self.root.geometry("1120x760")
         self.root.minsize(900, 640)
-        self.style = configure_theme(root)
+        initial_config = self.read_json(CONFIG_FILE, None)
+        if not isinstance(initial_config, dict):
+            initial_config = self.read_json(LEGACY_CONFIG_FILE, {})
+        self.theme_name = normalise_theme(
+            initial_config.get("theme") if isinstance(initial_config, dict) else None
+        )
+        self.style = configure_theme(root, self.theme_name)
         enable_dark_title_bar(root)
         self.configure_app_styles()
 
         self.closing = False
         self.page_frames: dict[str, ttk.Frame] = {}
         self.page_meta = {
-            "click": ("连点控制", "调整点击频率、鼠标位置和运行方式"),
-            "record": ("录制与回放", "把鼠标操作保存下来，随时按原节奏重播"),
-            "vision": ("图片识别", "发现屏幕上的目标图片后自动点击"),
-            "hotkeys": ("快捷键", "点击输入框后直接按键即可完成设置"),
+            "click": ("连点控制", "鼠标自动化 / 点击任务"),
+            "record": ("录制与回放", "鼠标自动化 / 动作序列"),
+            "vision": ("图片识别", "视觉自动化 / 目标管理"),
+            "hotkeys": ("设置", "偏好设置 / 主题与快捷键"),
         }
         self.current_page = "click"
 
@@ -234,12 +244,12 @@ class ClickerApp:
     # ------------------------------------------------------------------ UI
     def configure_app_styles(self):
         self.style.configure("Page.TFrame", background=COLORS["window"])
-        self.style.configure("SidebarText.TLabel", background=COLORS["sidebar"], foreground=COLORS["text_secondary"], font=("Segoe UI", 9))
-        self.style.configure("Brand.TLabel", background=COLORS["sidebar"], foreground=COLORS["text"], font=("Segoe UI Semibold", 16))
-        self.style.configure("HeroTitle.TLabel", background=COLORS["surface"], foreground=COLORS["text"], font=("Segoe UI Semibold", 15))
+        self.style.configure("SidebarText.TLabel", background=COLORS["sidebar"], foreground=COLORS["sidebar_muted"], font=("Microsoft YaHei UI", 9))
+        self.style.configure("Brand.TLabel", background=COLORS["sidebar"], foreground=COLORS["sidebar_text"], font=("Segoe UI Semibold", 17))
+        self.style.configure("HeroTitle.TLabel", background=COLORS["surface"], foreground=COLORS["text"], font=("Microsoft YaHei UI", 11, "bold"))
         self.style.configure("MetricTitle.TLabel", background=COLORS["surface"], foreground=COLORS["text_muted"], font=("Segoe UI", 8))
-        self.style.configure("MetricValue.TLabel", background=COLORS["surface"], foreground=COLORS["text"], font=("Segoe UI Semibold", 16))
-        self.style.configure("Capture.TEntry", fieldbackground=COLORS["selection"], background=COLORS["selection"], foreground="#FFFFFF", bordercolor=COLORS["accent"], lightcolor=COLORS["accent"], darkcolor=COLORS["accent"], padding=(10, 8), font=("Segoe UI Semibold", 10))
+        self.style.configure("MetricValue.TLabel", background=COLORS["surface"], foreground=COLORS["text"], font=("Microsoft YaHei UI", 16, "bold"))
+        self.style.configure("Capture.TEntry", fieldbackground=COLORS["selection"], background=COLORS["selection"], foreground=COLORS["accent"], bordercolor=COLORS["accent"], lightcolor=COLORS["accent"], darkcolor=COLORS["accent"], padding=(9, 6), font=("Microsoft YaHei UI", 9))
         self.style.configure("Vision.TEntry", fieldbackground=COLORS["input"], background=COLORS["input"], foreground=COLORS["text"], bordercolor=COLORS["border"], lightcolor=COLORS["border"], darkcolor=COLORS["border"], insertcolor=COLORS["text"], padding=(8, 5), font=("Segoe UI", 9))
         self.style.configure(
             "Vision.TLabelframe", background=COLORS["surface"],
@@ -258,11 +268,41 @@ class ClickerApp:
         # 1024px display.  Keep these secondary buttons compact without
         # changing the comfortable sizing used by the rest of the app.
         self.style.configure("Compact.TButton", padding=(10, 6), font=("Segoe UI", 9))
+        self.style.configure("Icon.TButton", padding=(9, 8), width=3)
+        self.style.configure("Mode.TRadiobutton", padding=(10, 6),
+                             font=("Microsoft YaHei UI", 9))
+        self.style.map("Mode.TRadiobutton", background=[("selected", COLORS["selection"])],
+                       foreground=[("selected", COLORS["accent"])])
+        if not hasattr(self, "ui_images"):
+            self.ui_images = {}
+        for name in ("click", "record", "vision", "hotkeys", "import", "export", "clear", "save"):
+            color = COLORS["sidebar_text"] if name in {"click", "record", "vision", "hotkeys"} else COLORS["text_secondary"]
+            self.ui_images[name] = symbol_image(
+                self.root, name, color, existing=self.ui_images.get(name))
+
+    def apply_theme(self, name: str):
+        name = normalise_theme(name)
+        self.theme_var.set(name)
+        if name == self.theme_name:
+            return
+        self.theme_name = name
+        self.style = configure_theme(self.root, name)
+        self.configure_app_styles()
+        refresh_theme_widgets(self.root)
+        self.set_status(getattr(self, "_status_text", "准备就绪"),
+                        getattr(self, "_status_tone", "neutral"))
+
+    def change_theme(self):
+        self.apply_theme(self.theme_var.get())
+        if self.write_json(CONFIG_FILE, self._collect_config()):
+            self.theme_status_var.set("已保存，下次启动沿用")
+        else:
+            self.theme_status_var.set("已切换，但保存失败")
 
     def build_ui(self):
         shell = ttk.Frame(self.root, style="App.TFrame")
         shell.pack(fill="both", expand=True)
-        self.sidebar = ttk.Frame(shell, style="Sidebar.TFrame", width=214)
+        self.sidebar = ttk.Frame(shell, style="Sidebar.TFrame", width=194)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         self.content = ttk.Frame(shell, style="Page.TFrame")
@@ -272,7 +312,7 @@ class ClickerApp:
         self.page_host = ttk.Frame(self.content, style="Page.TFrame")
         # Keep a little more horizontal room for the card layouts on compact
         # laptop displays; the cards already provide their own inner padding.
-        self.page_host.pack(fill="both", expand=True, padx=12, pady=(4, 0))
+        self.page_host.pack(fill="both", expand=True, padx=24, pady=(4, 12))
         self.build_click_page()
         self.build_record_page()
         self.build_vision_page()
@@ -281,17 +321,16 @@ class ClickerApp:
 
     def build_sidebar(self):
         brand = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
-        brand.pack(fill="x", padx=20, pady=(26, 30))
-        tk.Label(brand, text="●", bg=COLORS["accent"], fg="#FFFFFF", width=2, font=("Segoe UI", 14, "bold")).pack(side="left", padx=(0, 10))
+        brand.pack(fill="x", padx=22, pady=(30, 32))
         brand_text = ttk.Frame(brand, style="Sidebar.TFrame")
         brand_text.pack(side="left")
         ttk.Label(brand_text, text="Clicker Pro", style="Brand.TLabel").pack(anchor="w")
-        ttk.Label(brand_text, text="WINDOWS TOOL", style="SidebarText.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(brand_text, text="AUTOMATION WORKSPACE", style="SidebarText.TLabel", font=("Segoe UI", 7)).pack(anchor="w", pady=(5, 0))
         ttk.Label(self.sidebar, text="工作区", style="SidebarText.TLabel").pack(anchor="w", padx=22, pady=(0, 8))
         self.nav_buttons: dict[str, ttk.Button] = {}
-        for name, label in (("click", "◉   连点控制"), ("record", "◌   录制与回放"), ("vision", "▣   图片识别"), ("hotkeys", "⌨   快捷键")):
-            button = ttk.Button(self.sidebar, text=label, style="Nav.TButton", command=lambda page=name: self.show_page(page))
-            button.pack(fill="x", padx=12, pady=2)
+        for name, label in (("click", "  连点控制"), ("record", "  录制与回放"), ("vision", "  图片识别"), ("hotkeys", "  设置")):
+            button = ttk.Button(self.sidebar, text=label, image=self.ui_images[name], compound="left", style="Nav.TButton", command=lambda page=name: self.show_page(page))
+            button.pack(fill="x", padx=12, pady=4)
             self.nav_buttons[name] = button
         spacer = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
         spacer.pack(fill="both", expand=True)
@@ -300,35 +339,36 @@ class ClickerApp:
         ttk.Separator(tip).pack(fill="x", pady=(0, 14))
         self.hotkey_tip_var = tk.StringVar(value=self.hotkey_tip_text())
         ttk.Label(tip, textvariable=self.hotkey_tip_var, style="SidebarText.TLabel", justify="left").pack(anchor="w")
-        ttk.Label(tip, text="v1.4  ·  Ready", style="SidebarText.TLabel").pack(anchor="w", pady=(18, 0))
+        ttk.Label(tip, text="本地工作区", style="SidebarText.TLabel").pack(anchor="w", pady=(18, 0))
 
     def build_header(self):
         header = ttk.Frame(self.content, style="Page.TFrame")
-        header.pack(fill="x", padx=28, pady=(24, 12))
+        header.pack(fill="x", padx=24, pady=(20, 10))
         left = ttk.Frame(header, style="Page.TFrame")
         left.pack(side="left", fill="x", expand=True)
         self.page_title_var = tk.StringVar(value="连点控制")
         self.page_subtitle_var = tk.StringVar(value="调整点击频率、鼠标位置和运行方式")
         ttk.Label(left, textvariable=self.page_title_var, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(left, textvariable=self.page_subtitle_var, style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(left, textvariable=self.page_subtitle_var, style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
         right = ttk.Frame(header, style="Page.TFrame")
         right.pack(side="right")
         self.status_pill = tk.Label(right, text="●  准备就绪", bg=COLORS["surface_hover"], fg=COLORS["text_secondary"], padx=12, pady=6, font=("Segoe UI Semibold", 9))
         self.status_pill.pack(side="left", padx=(0, 10))
         self.header_stop_button = ttk.Button(right, text="停止全部", style="Danger.TButton", command=self.stop_all)
         self.header_stop_button.pack(side="left")
-        ttk.Button(right, text="导入", style="Compact.TButton", command=self.import_profile).pack(side="left", padx=(8, 0))
-        ttk.Button(right, text="导出", style="Compact.TButton", command=self.export_profile).pack(side="left", padx=(6, 0))
+        for name, title, command in (("import", "导入配置", self.import_profile), ("export", "导出配置", self.export_profile)):
+            button = ttk.Button(right, image=self.ui_images[name], style="Icon.TButton", command=command)
+            button.pack(side="left", padx=(6, 0))
+            Tooltip(button, title)
 
     def build_click_page(self):
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["click"] = page
-        hero = ttk.Frame(page, style="Card.TFrame", padding=(20, 16))
-        hero.pack(fill="x", pady=(0, 14))
+        hero = ttk.Frame(page, style="Card.TFrame", padding=(0, 4))
+        hero.pack(fill="x", pady=(0, 8))
         hero_left = ttk.Frame(hero, style="CardInner.TFrame")
         hero_left.pack(side="left", fill="x", expand=True)
-        ttk.Label(hero_left, text="让重复点击变得简单", style="HeroTitle.TLabel").pack(anchor="w")
-        ttk.Label(hero_left, text="设置一次，按下快捷键即可开始。运行期间可随时暂停或继续。", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(hero_left, text="任务配置", style="HeroTitle.TLabel").pack(anchor="w")
         self.pause_button = ttk.Button(
             hero, text="Ⅱ  暂停", style="Compact.TButton",
             command=self.toggle_pause, state="disabled",
@@ -336,18 +376,19 @@ class ClickerApp:
         self.pause_button.pack(side="right", padx=(10, 0))
         self.start_button = ttk.Button(hero, text="▶  开始连点", style="Primary.TButton", command=self.toggle_clicking)
         self.start_button.pack(side="right", padx=(18, 0))
+        ttk.Separator(page).pack(fill="x", pady=(0, 12))
 
         body = ttk.Frame(page, style="Page.TFrame")
         body.pack(fill="x")
         # Let the parameter card and the position card use their natural
         # widths; a shared uniform group wastes space on smaller displays.
-        body.columnconfigure(0, weight=3)
-        body.columnconfigure(1, weight=2)
-        params = ttk.Frame(body, style="Card.TFrame", padding=16)
-        params.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        target = ttk.Frame(body, style="Card.TFrame", padding=16)
-        target.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        ttk.Label(params, text="点击参数", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 18))
+        body.columnconfigure(0, weight=1, uniform="click-settings")
+        body.columnconfigure(1, weight=1, uniform="click-settings")
+        params = ttk.Frame(body, style="Card.TFrame", padding=(0, 0, 18, 0))
+        params.grid(row=0, column=0, sticky="nsew")
+        target = ttk.Frame(body, style="Card.TFrame", padding=(18, 0, 0, 0))
+        target.grid(row=0, column=1, sticky="nsew")
+        ttk.Label(params, text="点击参数", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 12))
         params.columnconfigure(0, weight=1)
         params.columnconfigure(1, weight=1)
 
@@ -363,33 +404,33 @@ class ClickerApp:
         ttk.Label(params, text="点击间隔", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
         ttk.Label(params, text="点击次数", style="Muted.TLabel").grid(row=1, column=1, sticky="w", padx=14, pady=(0, 6))
         interval_box = ttk.Frame(params, style="CardInner.TFrame")
-        interval_box.grid(row=2, column=0, sticky="ew", pady=(0, 16))
+        interval_box.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         interval_box.columnconfigure(0, weight=1)
-        ttk.Entry(interval_box, textvariable=self.interval_var).grid(row=0, column=0, sticky="ew")
+        ttk.Entry(interval_box, textvariable=self.interval_var, width=8).grid(row=0, column=0, sticky="ew")
         ttk.Label(interval_box, text="ms", style="Muted.TLabel").grid(row=0, column=1, padx=(8, 0))
         count_box = ttk.Frame(params, style="CardInner.TFrame")
-        count_box.grid(row=2, column=1, sticky="ew", padx=(14, 0), pady=(0, 16))
+        count_box.grid(row=2, column=1, sticky="ew", padx=(14, 0), pady=(0, 12))
         count_box.columnconfigure(0, weight=1)
-        ttk.Entry(count_box, textvariable=self.count_var).grid(row=0, column=0, sticky="ew")
+        ttk.Entry(count_box, textvariable=self.count_var, width=6).grid(row=0, column=0, sticky="ew")
         ttk.Label(count_box, text="0 = 无限", style="Muted.TLabel").grid(row=0, column=1, padx=(8, 0))
         ttk.Label(params, text="鼠标按键", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
         ttk.Label(params, text="点击方式", style="Muted.TLabel").grid(row=3, column=1, sticky="w", padx=14, pady=(0, 6))
-        ttk.Combobox(params, textvariable=self.click_button_var, values=["左键", "右键", "中键"], state="readonly").grid(row=4, column=0, sticky="ew", pady=(0, 16))
-        ttk.Combobox(params, textvariable=self.click_mode_var, values=["单击", "双击"], state="readonly").grid(row=4, column=1, sticky="ew", padx=(14, 0), pady=(0, 16))
+        ttk.Combobox(params, textvariable=self.click_button_var, values=["左键", "右键", "中键"], state="readonly", width=8).grid(row=4, column=0, sticky="ew", pady=(0, 16))
+        ttk.Combobox(params, textvariable=self.click_mode_var, values=["单击", "双击"], state="readonly", width=8).grid(row=4, column=1, sticky="ew", padx=(14, 0), pady=(0, 16))
         ttk.Label(params, text="开始前延时", style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(0, 6))
         ttk.Label(params, text="随机间隔", style="Muted.TLabel").grid(row=5, column=1, sticky="w", padx=14, pady=(0, 6))
         delay_box = ttk.Frame(params, style="CardInner.TFrame")
         delay_box.grid(row=6, column=0, sticky="ew")
         delay_box.columnconfigure(0, weight=1)
-        ttk.Entry(delay_box, textvariable=self.delay_var).grid(row=0, column=0, sticky="ew")
+        ttk.Entry(delay_box, textvariable=self.delay_var, width=8).grid(row=0, column=0, sticky="ew")
         ttk.Label(delay_box, text="秒", style="Muted.TLabel").grid(row=0, column=1, padx=(8, 0))
         random_box = ttk.Frame(params, style="CardInner.TFrame")
         random_box.grid(row=6, column=1, sticky="ew", padx=(14, 0))
-        ttk.Checkbutton(random_box, text="间隔随机 ±", variable=self.random_var).pack(side="left")
+        ttk.Checkbutton(random_box, text="±", variable=self.random_var).pack(side="left")
         self.random_percent_entry = ttk.Entry(random_box, textvariable=self.random_percent_var, width=5)
         self.random_percent_entry.pack(side="left", padx=(4, 3))
         ttk.Label(random_box, text="%", style="Muted.TLabel").pack(side="left")
-        ttk.Label(random_box, textvariable=self.random_range_hint_var, style="Hint.TLabel").pack(side="left", padx=(8, 0))
+        ttk.Label(params, textvariable=self.random_range_hint_var, style="Hint.TLabel").grid(row=7, column=1, sticky="w", padx=(14, 0), pady=(4, 4))
         self.random_percent_var.trace_add("write", self._update_random_range_hint)
         self.random_var.trace_add("write", self._update_random_range_state)
         self._update_random_range_state()
@@ -424,20 +465,21 @@ class ClickerApp:
             target, text="⌖  获取当前鼠标坐标", command=self.capture_position,
         )
         self.capture_position_button.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Checkbutton(target, text="完成后恢复鼠标原位置", variable=self.restore_cursor_var).grid(
-            row=8, column=0, sticky="w", pady=(8, 0)
+        ttk.Checkbutton(params, text="完成后恢复鼠标位置", variable=self.restore_cursor_var).grid(
+            row=9, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
-        runtime_box = ttk.Frame(target, style="CardInner.TFrame")
-        runtime_box.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Label(runtime_box, text="时长", style="Muted.TLabel").pack(side="left", padx=(0, 4))
-        ttk.Entry(runtime_box, textvariable=self.run_duration_var, width=4).pack(side="left")
+        runtime_box = ttk.Frame(params, style="CardInner.TFrame")
+        runtime_box.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Label(runtime_box, text="运行时限", style="Muted.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Entry(runtime_box, textvariable=self.run_duration_var, width=8).pack(side="left")
         ttk.Label(runtime_box, text="s", style="Hint.TLabel").pack(side="left", padx=(3, 0))
-        ttk.Label(target, text="后台坐标相对窗口客户区；同一位置会投递到所有目标。", style="Hint.TLabel", wraplength=210).grid(row=9, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        ttk.Label(runtime_box, text="0 = 不限", style="Hint.TLabel").pack(side="left", padx=(10, 0))
         target.columnconfigure(0, weight=1)
         target.columnconfigure(1, weight=1)
 
-        stats = ttk.Frame(page, style="Card.TFrame", padding=(20, 15))
-        stats.pack(fill="x", pady=(14, 0))
+        ttk.Separator(page).pack(fill="x", pady=(12, 0))
+        stats = ttk.Frame(page, style="Card.TFrame", padding=(0, 10))
+        stats.pack(fill="x")
         self.stat_vars: dict[str, tk.StringVar] = {}
         for i, (key, title, value) in enumerate((("clicks", "本次点击", "0"), ("elapsed", "运行时长", "00:00"), ("rate", "实际速度", "等待开始"))):
             if i:
@@ -446,16 +488,18 @@ class ClickerApp:
             ttk.Label(stats, text=title, style="MetricTitle.TLabel").grid(row=0, column=i * 2, sticky="w")
             ttk.Label(stats, textvariable=self.stat_vars[key], style="MetricValue.TLabel").grid(row=1, column=i * 2, sticky="w", pady=(3, 0))
             stats.columnconfigure(i * 2, weight=1)
-        self.progress = ttk.Progressbar(stats, style="Horizontal.TProgressbar", mode="determinate", maximum=100)
-        self.progress.grid(row=0, column=6, rowspan=2, sticky="e", padx=(12, 0))
-        ttk.Label(page, text="提示：你可以在其他窗口工作；F6 开始/停止，F9 暂停/继续，F8 停止全部任务。", style="Hint.TLabel").pack(anchor="w", pady=(12, 0))
+        progress_track = ttk.Frame(stats, height=4)
+        progress_track.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(6, 0))
+        progress_track.pack_propagate(False)
+        self.progress = ttk.Progressbar(progress_track, style="Horizontal.TProgressbar", mode="determinate", maximum=100)
+        self.progress.pack(fill="both", expand=True)
         self.update_position_state()
         self._update_random_range_hint()
 
     def build_record_page(self):
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["record"] = page
-        toolbar = ttk.Frame(page, style="Card.TFrame", padding=18)
+        toolbar = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
         toolbar.pack(fill="x", pady=(0, 14))
         controls = ttk.Frame(toolbar, style="CardInner.TFrame")
         controls.pack(fill="x")
@@ -477,24 +521,24 @@ class ClickerApp:
         self.loop_var = tk.StringVar(value="1")
         ttk.Entry(options, textvariable=self.loop_var, width=6).pack(side="left", padx=(6, 0))
         ttk.Label(options, text="0 = 无限", style="Hint.TLabel").pack(side="left", padx=(7, 0))
-        ttk.Separator(options, orient="vertical").pack(side="left", fill="y", padx=14)
+        background_options = ttk.Frame(toolbar, style="CardInner.TFrame")
+        background_options.pack(fill="x", pady=(14, 0))
         self.record_background_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            options, text="后台录制/回放", variable=self.record_background_var,
+            background_options, text="后台录制/回放", variable=self.record_background_var,
             command=self.update_record_background_state,
         ).pack(side="left")
         self.record_background_button = ttk.Button(
-            options, text="目标窗口", style="Compact.TButton",
+            background_options, text="目标窗口", style="Compact.TButton",
             command=lambda: self.open_background_window_selector(set_click_mode=False),
         )
         self.record_background_button.pack(side="left", padx=(8, 0))
         self.update_record_background_state()
         self.record_status_var = tk.StringVar(value="尚未录制动作")
-        status_card = ttk.Frame(page, style="Card.TFrame", padding=(18, 12))
+        status_card = ttk.Frame(page, style="Card.TFrame", padding=(0, 8))
         status_card.pack(fill="x", pady=(0, 14))
         ttk.Label(status_card, textvariable=self.record_status_var, style="Count.TLabel").pack(side="left")
-        ttk.Label(status_card, text="录制时请切换到目标窗口操作，F7 可快速开始/停止。", style="Hint.TLabel").pack(side="right")
-        table_card = ttk.Frame(page, style="Card.TFrame", padding=14)
+        table_card = ttk.Frame(page, style="Card.TFrame", padding=0)
         table_card.pack(fill="both", expand=True)
         table_frame = ttk.Frame(table_card, style="CardInner.TFrame")
         table_frame.pack(fill="both", expand=True)
@@ -509,30 +553,36 @@ class ClickerApp:
         self.event_tree.configure(yscrollcommand=scroll.set)
         self.event_tree.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self.record_empty_label = tk.Label(
+            self.event_tree, text="暂无录制动作",
+            bg=COLORS["input"], fg=COLORS["text_muted"],
+            font=("Microsoft YaHei UI", 10), pady=14,
+        )
+        bind_theme(self.record_empty_label, bg="input", fg="text_muted")
+        self.record_empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
     def build_vision_page(self):
         """Build the multi-template screen recognition workspace."""
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["vision"] = page
 
-        intro = ttk.Frame(page, style="Card.TFrame", padding=20)
+        intro = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
         intro.pack(fill="x", pady=(0, 14))
         intro_left = ttk.Frame(intro, style="CardInner.TFrame")
         intro_left.pack(side="left", fill="x", expand=True)
-        ttk.Label(intro_left, text="看见目标，自动点击", style="HeroTitle.TLabel").pack(anchor="w")
-        ttk.Label(intro_left, text="添加一张或多张目标图片，程序会持续扫描屏幕并在匹配中心执行自定义动作。支持 Ctrl+V 直接粘贴截图。", style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
+        ttk.Label(intro_left, text="识别任务", style="HeroTitle.TLabel").pack(anchor="w")
         self.vision_start_button = ttk.Button(intro, text="▶  开始识别", style="Primary.TButton", command=self.toggle_vision)
         self.vision_start_button.pack(side="right")
         self.vision_paste_button = ttk.Button(intro, text="粘贴图片", style="Compact.TButton", command=self.paste_vision_image)
         self.vision_paste_button.pack(side="right", padx=(0, 8))
 
-        toolbar = ttk.Frame(page, style="Card.TFrame", padding=(18, 13))
+        toolbar = ttk.Frame(page, style="Card.TFrame", padding=(0, 8))
         toolbar.pack(fill="x", pady=(0, 14))
-        ttk.Button(toolbar, text="＋  添加图片", style="Primary.TButton", command=self.add_vision_images).pack(side="left")
+        ttk.Button(toolbar, text="＋  添加图片", style="Compact.TButton", command=self.add_vision_images).pack(side="left")
         ttk.Button(toolbar, text="⌁  测试一次", style="Compact.TButton", command=self.scan_vision_once).pack(side="left", padx=(10, 0))
         ttk.Button(toolbar, text="删除选中", style="Compact.TButton", command=self.remove_vision_template).pack(side="left", padx=(10, 0))
         ttk.Button(toolbar, text="清空全部", style="Compact.TButton", command=self.clear_vision_templates).pack(side="left", padx=(10, 0))
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=18)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
         ttk.Label(toolbar, text="扫描间隔", style="Muted.TLabel").pack(side="left")
         self.vision_scan_var = tk.StringVar(value="0.20")
         ttk.Combobox(toolbar, textvariable=self.vision_scan_var, values=["0.05", "0.10", "0.20", "0.35", "0.50", "1.00"], state="readonly", width=7).pack(side="left", padx=(8, 4))
@@ -543,7 +593,7 @@ class ClickerApp:
         # useful when a scan finds nothing or a template cannot be loaded,
         # while the toolbar status remains a short at-a-glance indicator.
         self.vision_log_var = tk.StringVar(value="识别日志会显示在这里")
-        log_bar = ttk.Frame(page, style="Card.TFrame", padding=(14, 8))
+        log_bar = ttk.Frame(page, style="Card.TFrame", padding=(0, 8))
         log_bar.pack(fill="x", pady=(0, 14))
         ttk.Label(log_bar, text="识别日志", style="Muted.TLabel").pack(side="left")
         self.vision_background_var = tk.BooleanVar(value=False)
@@ -571,7 +621,7 @@ class ClickerApp:
         body.columnconfigure(1, weight=6)
         body.rowconfigure(0, weight=1)
 
-        list_card = ttk.Frame(body, style="Card.TFrame", padding=14)
+        list_card = ttk.Frame(body, style="Card.TFrame", padding=(0, 8, 10, 0))
         list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         ttk.Label(list_card, text="识别目标", style="CardTitle.TLabel").pack(anchor="w", padx=6, pady=(4, 12))
         list_inner = ttk.Frame(list_card, style="CardInner.TFrame")
@@ -592,6 +642,12 @@ class ClickerApp:
         self.vision_tree.configure(yscrollcommand=vision_scroll.set)
         vision_scroll.pack(side="right", fill="y")
         self.vision_tree.pack(side="left", fill="both", expand=True)
+        self.vision_empty_label = tk.Label(
+            self.vision_tree, text="暂无识别目标", bg=COLORS["input"],
+            fg=COLORS["text_muted"], font=("Microsoft YaHei UI", 10),
+        )
+        bind_theme(self.vision_empty_label, bg="input", fg="text_muted")
+        self.vision_empty_label.place(relx=0.5, rely=0.5, anchor="center")
         self.vision_tree.bind("<<TreeviewSelect>>", self.on_vision_select)
         # Keep row actions close to the target.  A right-click first selects
         # the row under the pointer, while Delete remains local to this
@@ -605,12 +661,15 @@ class ClickerApp:
             background=COLORS["surface_hover"],
             foreground=COLORS["text"],
             activebackground=COLORS["selection"],
-            activeforeground="#FFFFFF",
+            activeforeground=COLORS["accent"],
             disabledforeground=COLORS["text_muted"],
             borderwidth=1,
             relief="solid",
             font=("Segoe UI", 9),
         )
+        bind_theme(self.vision_context_menu, background="surface_hover", foreground="text",
+                   activebackground="selection", activeforeground="accent",
+                   disabledforeground="text_muted")
         self.vision_context_menu.add_command(
             label="查看大图", command=self._open_vision_preview
         )
@@ -619,15 +678,8 @@ class ClickerApp:
             label="删除选中目标", accelerator="Del",
             command=self.remove_vision_template,
         )
-        ttk.Label(
-            list_card,
-            text="选中目标后，在右侧编辑设置；右键或按 Del 可删除",
-            style="Hint.TLabel",
-            wraplength=260,
-            justify="left",
-        ).pack(anchor="w", padx=6, pady=(10, 2))
 
-        edit_card = ttk.Frame(body, style="Card.TFrame", padding=14)
+        edit_card = ttk.Frame(body, style="Card.TFrame", padding=(10, 8, 0, 0))
         edit_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         edit_card.columnconfigure(0, weight=1)
         edit_card.rowconfigure(1, weight=1)
@@ -645,6 +697,7 @@ class ClickerApp:
             editor_view, background=COLORS["surface"], highlightthickness=0,
             borderwidth=0,
         )
+        bind_theme(self.vision_editor_canvas, background="surface")
         self.vision_editor_canvas.grid(row=0, column=0, sticky="nsew")
         self.vision_editor_scroll = ttk.Scrollbar(
             editor_view, orient="vertical", command=self.vision_editor_canvas.yview
@@ -707,6 +760,7 @@ class ClickerApp:
             editor, bg=COLORS["input"], height=190,
             highlightthickness=1, highlightbackground=COLORS["border"],
         )
+        bind_theme(self.vision_preview_frame, bg="input", highlightbackground="border")
         self.vision_preview_frame.pack(fill="x", pady=(12, 4))
         self.vision_preview_frame.pack_propagate(False)
         self.vision_preview_frame.bind("<Configure>", self._resize_vision_preview_panel)
@@ -715,6 +769,7 @@ class ClickerApp:
             justify="center", bg=COLORS["input"], fg=COLORS["text_muted"],
             font=("Segoe UI", 10),
         )
+        bind_theme(self.vision_preview_label, bg="input", fg="text_muted")
         self.vision_preview_label.pack(fill="both", expand=True)
         self.vision_preview_label.bind("<Configure>", self._schedule_vision_preview_render)
         self.vision_preview_label.bind("<Double-Button-1>", self._open_vision_preview)
@@ -874,6 +929,10 @@ class ClickerApp:
         if not hasattr(self, "vision_tree"):
             return
         self.vision_tree.delete(*self.vision_tree.get_children())
+        if self.vision_templates:
+            self.vision_empty_label.place_forget()
+        else:
+            self.vision_empty_label.place(relx=0.5, rely=0.5, anchor="center")
         for item in self.vision_templates:
             iid = item["id"]
             self.vision_tree.insert("", "end", iid=iid, values=(
@@ -1322,12 +1381,13 @@ class ClickerApp:
             window = tk.Toplevel(self.root)
             self._vision_preview_window = window
             window.title("目标图片预览")
-            window.configure(bg=COLORS["input"])
+            bind_theme(window, bg="input")
             window.geometry("720x520")
             window.minsize(320, 240)
-            panel = tk.Frame(window, bg=COLORS["input"])
+            enable_dark_title_bar(window)
+            panel = bind_theme(tk.Frame(window), bg="input")
             panel.pack(fill="both", expand=True, padx=10, pady=10)
-            image_label = tk.Label(panel, bg=COLORS["input"], fg=COLORS["text_muted"], anchor="center")
+            image_label = bind_theme(tk.Label(panel, anchor="center"), bg="input", fg="text_muted")
             image_label.pack(fill="both", expand=True)
             preview_source = source.copy()
 
@@ -2088,46 +2148,54 @@ class ClickerApp:
     def build_hotkey_page(self):
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["hotkeys"] = page
-        intro = ttk.Frame(page, style="Card.TFrame", padding=20)
+        appearance = ttk.Frame(page, style="Card.TFrame", padding=(12, 10))
+        appearance.pack(fill="x", pady=(0, 14))
+        ttk.Label(appearance, text="主题颜色", style="HeroTitle.TLabel").pack(side="left", padx=(0, 22))
+        self.theme_var = tk.StringVar(value=self.theme_name)
+        for name, label in (("dark", "深色"), ("light", "浅色")):
+            ttk.Radiobutton(appearance, text=label, value=name, variable=self.theme_var,
+                            command=self.change_theme).pack(side="left", padx=(0, 16))
+        self.theme_status_var = tk.StringVar(value="立即生效 · 自动保存")
+        ttk.Label(appearance, textvariable=self.theme_status_var, style="Hint.TLabel").pack(side="right")
+        intro = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
         intro.pack(fill="x", pady=(0, 14))
-        ttk.Label(intro, text="按键捕获", style="HeroTitle.TLabel").pack(anchor="w")
-        ttk.Label(intro, text="点击任意输入框，然后按下一个键或组合键。程序会自动识别并显示友好名称。", style="Muted.TLabel").pack(anchor="w", pady=(5, 0))
-        card = ttk.Frame(page, style="Card.TFrame", padding=20)
+        ttk.Label(intro, text="任务快捷键", style="HeroTitle.TLabel").pack(anchor="w")
+        card = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
         card.pack(fill="x", pady=(0, 14))
         card.columnconfigure(1, weight=1)
         self.hotkey_vars: dict[str, tk.StringVar] = {}
         self.hotkey_state_vars: dict[str, tk.StringVar] = {}
         self.hotkey_entries: dict[str, ttk.Entry] = {}
-        hotkey_names = ("toggle", "record", "stop", "pause")
+        hotkey_names = tuple(HOTKEY_DEFAULTS)
         for row, name in enumerate(hotkey_names):
             self.hotkey_vars[name] = tk.StringVar(value=self.display_hotkey(HOTKEY_DEFAULTS[name]))
             self.hotkey_state_vars[name] = tk.StringVar(value="点击输入框后按键")
             ttk.Label(card, text=HOTKEY_LABELS[name], style="CardText.TLabel").grid(row=row, column=0, sticky="w", pady=7)
-            entry = ttk.Entry(card, textvariable=self.hotkey_vars[name], width=25)
+            entry = ttk.Entry(card, textvariable=self.hotkey_vars[name], width=14)
             entry.grid(row=row, column=1, sticky="ew", padx=(28, 10), pady=7)
             entry.bind("<Button-1>", lambda event, key=name: self.arm_hotkey_capture(key))
             entry.bind("<KeyPress>", lambda event, key=name: self.capture_hotkey(event, key))
             self.hotkey_entries[name] = entry
             ttk.Label(card, textvariable=self.hotkey_state_vars[name], style="Hint.TLabel", width=19).grid(row=row, column=2, sticky="e", pady=7)
-            ttk.Button(card, text="清除", command=lambda key=name: self.clear_hotkey(key)).grid(row=row, column=3, padx=(12, 0), pady=7)
+            clear = ttk.Button(card, image=self.ui_images["clear"], style="Icon.TButton", command=lambda key=name: self.clear_hotkey(key))
+            clear.grid(row=row, column=3, padx=(12, 0), pady=7)
+            Tooltip(clear, "清除快捷键")
         separator_row = len(hotkey_names)
         ttk.Separator(card).grid(row=separator_row, column=0, columnspan=4, sticky="ew", pady=(10, 14))
         self.hotkey_apply_status = tk.StringVar(value="修改后点击应用，快捷键会立即生效")
         action_row = separator_row + 1
         ttk.Button(card, text="应用快捷键", style="Primary.TButton", command=self.apply_hotkeys).grid(row=action_row, column=0, sticky="w")
         ttk.Button(card, text="保存配置", command=self.save_config).grid(row=action_row, column=1, sticky="w", padx=(12, 0))
-        ttk.Label(card, textvariable=self.hotkey_apply_status, style="Hint.TLabel").grid(row=action_row, column=2, columnspan=2, sticky="e")
-        help_card = ttk.Frame(page, style="Card.TFrame", padding=20)
-        help_card.pack(fill="x")
-        ttk.Label(help_card, text="使用小贴士", style="CardTitle.TLabel").pack(anchor="w")
-        ttk.Label(help_card, text="支持 F1–F12、字母、数字、空格、回车，以及 Ctrl / Alt / Shift 组合键。默认 F6 开关、F7 录制、F8 停止全部、F9 暂停/继续。\n图片识别页的 Ctrl+V 用于直接粘贴图片，不能分配给其他任务。\n如果快捷键没有反应，请换一个没有被其他软件占用的组合。", style="Muted.TLabel", justify="left").pack(anchor="w", pady=(8, 0))
+        ttk.Label(card, textvariable=self.hotkey_apply_status, style="Hint.TLabel", wraplength=230).grid(row=action_row, column=2, columnspan=2, sticky="e")
 
     def build_footer(self):
-        footer = tk.Frame(self.content, bg=COLORS["sidebar"], height=30)
-        footer.pack(fill="x", side="bottom")
+        footer = bind_theme(tk.Frame(self.content, height=30), bg="surface_hover")
+        footer.pack(fill="x", side="bottom", before=self.page_host)
         footer.pack_propagate(False)
         self.footer_var = tk.StringVar(value="就绪 · 全局快捷键已启用")
-        tk.Label(footer, textvariable=self.footer_var, bg=COLORS["sidebar"], fg=COLORS["text_muted"], anchor="w", padx=18, font=("Segoe UI", 8)).pack(fill="both")
+        bind_theme(tk.Label(footer, textvariable=self.footer_var, anchor="w", padx=24,
+                            font=("Microsoft YaHei UI", 8)),
+                   bg="surface_hover", fg="text_secondary").pack(fill="both")
 
     def show_page(self, name: str):
         if name not in self.page_frames:
@@ -2181,6 +2249,7 @@ class ClickerApp:
         """Apply a validated config/profile dictionary to the live UI."""
         if not isinstance(data, dict):
             raise ValueError("配置档案内容必须是对象")
+        self.apply_theme(data.get("theme", self.theme_name))
         try:
             if "interval_ms" in data:
                 self.interval_var.set(str(data["interval_ms"]))
@@ -2227,6 +2296,7 @@ class ClickerApp:
             "record": "record_hotkey",
             "stop": "stop_hotkey",
             "pause": "pause_hotkey",
+            "play": "play_hotkey",
         }
         conflicting_hotkeys = []
         invalid_hotkeys = []
@@ -2322,6 +2392,7 @@ class ClickerApp:
         """Return one canonical settings snapshot for save/export/close."""
         return {
             "schema_version": 4,
+            "theme": self.theme_name,
             "interval_ms": self.interval_var.get(), "count": self.count_var.get(), "button": self.click_button_var.get(),
             "click_mode": self.click_mode_var.get(), "random": self.random_var.get(), "position": self.position_var.get(),
             "x": self.x_var.get(), "y": self.y_var.get(), "delay": self.delay_var.get(),
@@ -2342,6 +2413,7 @@ class ClickerApp:
             "record_hotkey": self.hotkey_specs.get("record", HOTKEY_DEFAULTS["record"]),
             "stop_hotkey": self.hotkey_specs.get("stop", HOTKEY_DEFAULTS["stop"]),
             "pause_hotkey": self.hotkey_specs.get("pause", HOTKEY_DEFAULTS["pause"]),
+            "play_hotkey": self.hotkey_specs.get("play", HOTKEY_DEFAULTS["play"]),
         }
 
     @staticmethod
@@ -2411,6 +2483,8 @@ class ClickerApp:
         """Reject malformed profile-wide values before touching the UI."""
         if not isinstance(data, dict):
             raise ValueError("配置档案缺少 settings 对象")
+        if "theme" in data and (not isinstance(data["theme"], str) or data["theme"] not in THEMES):
+            raise ValueError("主题颜色必须是 dark 或 light")
 
         def number(key: str, minimum: float = 0.0, maximum: Optional[float] = None):
             if key not in data:
@@ -2473,6 +2547,7 @@ class ClickerApp:
             "record": "record_hotkey",
             "stop": "stop_hotkey",
             "pause": "pause_hotkey",
+            "play": "play_hotkey",
         }
         for name, key in aliases.items():
             old_key = f"{name}_hotkey"
@@ -2906,25 +2981,29 @@ class ClickerApp:
         if valid:
             self.record_status_var.set(f"已加载 {len(valid)} 个动作")
 
-    def save_recording(self):
+    def save_recording(self) -> bool:
         with self.event_lock:
             data = list(self.events)
         if not self.write_json(RECORD_FILE, data):
             self.set_status("录制保存失败", "danger")
+            return False
+        return True
 
     # -------------------------------------------------------------- status
     def set_status(self, text: str, tone: str = "neutral"):
+        self._status_text, self._status_tone = text, tone
         colours = {
             "neutral": (COLORS["surface_hover"], COLORS["text_secondary"]),
-            "success": (COLORS["success"], "#071A12"),
-            "warning": (COLORS["warning"], "#211706"),
-            "danger": (COLORS["danger"], "#260A0E"),
+            "success": (COLORS["success_surface"], COLORS["success"]),
+            "warning": (COLORS["warning_surface"], COLORS["warning"]),
+            "danger": (COLORS["danger_surface"], COLORS["danger"]),
         }
         bg, fg = colours.get(tone, colours["neutral"])
         if self.closing:
             return
         try:
-            self.status_pill.configure(text=f"●  {text}", bg=bg, fg=fg)
+            short_text = text if len(text) <= 10 else text[:9] + "…"
+            self.status_pill.configure(text=f"●  {short_text}", bg=bg, fg=fg)
             self.footer_var.set(text)
         except (tk.TclError, RuntimeError):
             pass
@@ -2974,14 +3053,10 @@ class ClickerApp:
         count = len(self.background_targets)
         if not count:
             label.set("尚未选择后台窗口")
-            return
-        names = [str(item.get("title", "")).strip() for item in self.background_targets]
-        summary = "、".join(name for name in names[:2] if name)
-        if count > 2:
-            summary += f" 等 {count} 个窗口"
         else:
-            summary = f"已选 {count} 个：{summary}"
-        label.set(summary)
+            title = str(self.background_targets[0].get("title", "")).strip()
+            title = title if len(title) <= 16 else title[:15] + "…"
+            label.set(f"已选 {count} 个：{title}")
         button_text = f"目标窗口 ({count})" if count else "目标窗口"
         for name in ("record_background_button", "vision_background_button"):
             button = getattr(self, name, None)
@@ -3026,6 +3101,7 @@ class ClickerApp:
             return
         window = tk.Toplevel(self.root)
         window.title("选择后台目标窗口")
+        bind_theme(window, bg="window")
         window.geometry("720x430")
         window.minsize(520, 320)
         window.transient(self.root)
@@ -3174,6 +3250,7 @@ class ClickerApp:
             ("toggle", "连点开关"),
             ("pause", "暂停 / 继续"),
             ("record", "录制开关"),
+            ("play", "回放开关"),
             ("stop", "停止全部"),
         )
         return "\n".join(
@@ -3333,6 +3410,7 @@ class ClickerApp:
             "record": self.toggle_recording,
             "stop": self.stop_all,
             "pause": self.toggle_pause,
+            "play": self.play_recording,
         }
         try:
             for name, spec in specs.items():
@@ -3890,14 +3968,37 @@ class ClickerApp:
             if self.record_background else "录制中… 请在目标窗口操作"
         )
         self.set_status("正在录制", "warning")
+
+        # pynput 1.8+ passes an extra injected flag. Keep the session ID in
+        # the closure: a positional default would be overwritten by that
+        # flag and cause real mouse events to be rejected as stale.
+        # The optional flag also supports the callbacks used by pynput 1.7.
+        def on_move(x, y, injected=False):
+            self.on_move(x, y, session_id)
+
+        def on_click(x, y, button, pressed, injected=False):
+            self.on_click(x, y, button, pressed, session_id)
+
         try:
             self.record_listener = mouse.Listener(
-                on_move=lambda x, y, sid=session_id: self.on_move(x, y, sid),
-                on_click=lambda x, y, button, pressed, sid=session_id: self.on_click(x, y, button, pressed, sid),
+                on_move=on_move,
+                on_click=on_click,
             )
             self.record_listener.start()
         except Exception as exc:
-            self.recording = False
+            with self.event_lock:
+                self.recording = False
+                self.record_session_id += 1
+            listener = self.record_listener
+            self.record_listener = None
+            if listener is not None:
+                try:
+                    listener.stop()
+                except Exception:
+                    pass
+            self.record_background_targets = []
+            self.record_button.configure(text="●  开始录制")
+            self.record_status_var.set(f"录制启动失败：{exc}")
             self.set_status(f"录制启动失败：{exc}", "danger")
 
     def on_move(self, x, y, session_id: Optional[int] = None):
@@ -3974,6 +4075,7 @@ class ClickerApp:
             return
         if session_id is not None and session_id != self.record_session_id:
             return
+        self.record_empty_label.place_forget()
         action = "移动" if event["type"] == "move" else "点击"
         button = {"left": "左键", "right": "右键", "middle": "中键"}.get(event.get("button", "left"), "左键") if event["type"] == "click" else "—"
         self.event_tree.insert("", "end", values=(index, f"{event['t']:.2f}s", action, f"{event['x']}, {event['y']}", button))
@@ -3987,12 +4089,15 @@ class ClickerApp:
         if not hasattr(self, "event_tree"):
             return
         self.event_tree.delete(*self.event_tree.get_children())
+        if not self.events:
+            self.record_empty_label.place(relx=0.5, rely=0.5, anchor="center")
         for index, event in enumerate(self.events[-600:], start=max(1, len(self.events) - 599)):
             self.append_event_row(index, event, self.record_session_id)
 
     def stop_recording(self):
-        self.recording = False
-        self.record_session_id += 1
+        with self.event_lock:
+            self.recording = False
+            self.record_session_id += 1
         listener = self.record_listener
         self.record_listener = None
         if listener:
@@ -4002,10 +4107,21 @@ class ClickerApp:
             except Exception:
                 pass
         self.record_background_targets = []
-        self.save_recording()
+        saved = self.save_recording()
         self.record_button.configure(text="●  开始录制")
-        self.record_status_var.set(f"已录制 {len(self.events):,} 个动作并保存")
-        self.set_status("录制已保存", "success")
+        # Stopping invalidates queued row callbacks; rebuild from the final
+        # snapshot so a quick Stop still shows every recorded action.
+        self.refresh_event_tree()
+        count = len(self.events)
+        if not saved:
+            self.record_status_var.set(f"已录制 {count:,} 个动作，保存失败（动作仍在内存中）")
+            self.set_status(f"录制保存失败，请检查目录权限和磁盘空间：{RECORD_FILE.parent}", "danger")
+        elif not count:
+            self.record_status_var.set("未录制到动作，请在目标窗口点击后重试")
+            self.set_status("未录制到动作", "warning")
+        else:
+            self.record_status_var.set(f"已录制 {count:,} 个动作并保存")
+            self.set_status("录制已保存", "success")
 
     def clear_recording(self):
         if self.recording:
@@ -4017,6 +4133,7 @@ class ClickerApp:
             self.record_session_id += 1
         self.event_tree.delete(*self.event_tree.get_children())
         self.write_json(RECORD_FILE, [])
+        self.record_empty_label.place(relx=0.5, rely=0.5, anchor="center")
         self.record_status_var.set("尚未录制动作")
         self.set_status("记录已清空", "neutral")
 
@@ -4185,11 +4302,14 @@ class ClickerApp:
     def stop_all(self):
         self.stop_clicking(wait=True)
         self.stop_playback(wait=True)
-        if self.recording:
-            self.stop_recording()
         if self.vision_running:
             self.stop_vision()
-        self.set_status("全部任务已停止", "neutral")
+        if self.recording:
+            # Keep the recording's save result visible for the Stop button
+            # and F8, especially when the file could not be written.
+            self.stop_recording()
+        else:
+            self.set_status("全部任务已停止", "neutral")
 
     def close(self):
         if self.closing:

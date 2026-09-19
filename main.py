@@ -76,6 +76,9 @@ PROFILE_IMAGE_SUFFIXES = {
     ".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif",
     ".tif", ".tiff", ".ico", ".jp2", ".pbm", ".pgm", ".ppm", ".pnm",
 }
+# Press immediately, then keep the button down across a typical game frame.
+# This applies only to recognition clicks; autoclick/replay keep their timing.
+VISION_CLICK_DURATION = 0.04
 LEGACY_CONFIG_FILE = APP_DIR / "clicker_config.json"
 LEGACY_RECORD_FILE = APP_DIR / "clicker_record.json"
 
@@ -217,6 +220,11 @@ class ClickerApp:
         self._vision_test_running = False
         self._vision_diagnostic_at = 0.0
         self._vision_match_log_at = 0.0
+        # Workers publish into a bounded mailbox, never through Tk.after:
+        # cross-thread Tk calls wait for the UI and can stall recognition.
+        self._vision_ui_lock = threading.Lock()
+        self._vision_ui_pending: dict[str, tuple[Callable, tuple]] = {}
+        self._vision_ui_job = None
         self.vision_template_counter = 0
         self.vision_preview_image = None
         # Keep the decoded source image separately from the PhotoImage shown
@@ -245,6 +253,7 @@ class ClickerApp:
         self.show_page("click")
         self.start_hotkeys()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self._vision_ui_job = self.root.after(20, self._drain_vision_ui)
 
     # ------------------------------------------------------------------ UI
     def configure_app_styles(self):
@@ -1874,12 +1883,14 @@ class ClickerApp:
                     summaries.append(engine.scan_summary())
                     if engine.last_error:
                         errors.append(str(engine.last_error))
-                self.safe_after(
-                    self.show_vision_scan_result, matches,
+                self._queue_vision_ui(
+                    "test", self.show_vision_scan_result, matches,
                     "；".join(errors), background, "；".join(summaries), generation,
+                    generation=generation,
                 )
             except Exception as exc:
-                self.safe_after(self._finish_vision_scan_error, str(exc), generation)
+                self._queue_vision_ui("test", self._finish_vision_scan_error, str(exc), generation,
+                                      generation=generation)
         self._set_vision_preview_hidden(True)
         try:
             threading.Thread(target=worker, name="vision-one-shot", daemon=True).start()
@@ -2127,6 +2138,37 @@ class ClickerApp:
         self.vision_global_status.set("待机")
         self.set_status("图片识别已停止", "neutral")
 
+    def _queue_vision_ui(self, slot: str, callback: Callable, *args,
+                         generation: Optional[int]):
+        """Keep only the latest status/error/test result while the UI is busy."""
+        with self._vision_ui_lock:
+            if not self.closing and (generation is None or generation == self.vision_generation):
+                self._vision_ui_pending[slot] = (callback, args)
+
+    def _drain_vision_ui(self):
+        """Run only on Tk's thread; hold no lock while rendering callbacks."""
+        self._vision_ui_job = None
+        with self._vision_ui_lock:
+            # Report an error last even if a status arrived after it. A
+            # successful match in another window must not hide input failure.
+            pending = tuple(self._vision_ui_pending[slot]
+                            for slot in ("status", "test", "error")
+                            if slot in self._vision_ui_pending)
+            self._vision_ui_pending.clear()
+        if self.closing:
+            return
+        try:
+            for callback, args in pending:
+                if self.closing:
+                    break
+                try:
+                    callback(*args)
+                except Exception as exc:
+                    self.root.report_callback_exception(type(exc), exc, exc.__traceback__)
+        finally:
+            if not self.closing:
+                self._vision_ui_job = self.root.after(20, self._drain_vision_ui)
+
     def on_vision_scan(self, matches, generation: int, hwnd: Optional[int] = None):
         if self.closing or generation != self.vision_generation or not self.vision_running or matches:
             return
@@ -2134,7 +2176,8 @@ class ClickerApp:
         if engine is None or engine.last_error or time.monotonic() - self._vision_diagnostic_at < 2:
             return
         self._vision_diagnostic_at = time.monotonic()
-        self.safe_after(self._vision_no_match_ui, engine.scan_summary(), generation)
+        self._queue_vision_ui("status", self._vision_no_match_ui, engine.scan_summary(), generation,
+                              generation=generation)
 
     def _vision_no_match_ui(self, summary: str, generation: int):
         if self.closing or generation != self.vision_generation or not self.vision_running:
@@ -2164,7 +2207,8 @@ class ClickerApp:
             else:
                 hwnd = 0
                 engine = self.vision_engine
-            if engine is None:
+            if (engine is None or self.closing or not self.vision_running
+                    or (generation is not None and generation != self.vision_generation)):
                 return
             stop_event = engine.stop_event
             actions = getattr(result, "actions", None)
@@ -2181,7 +2225,8 @@ class ClickerApp:
                     post_window_mouse_move(hwnd, px, py)
 
                 def click_fn(button):
-                    post_window_click(hwnd, x, y, button)
+                    post_window_click(hwnd, x, y, button,
+                                      duration=VISION_CLICK_DURATION, stop_event=stop_event)
 
                 def mouse_down_fn(button):
                     post_window_mouse_down(hwnd, x, y, button)
@@ -2194,7 +2239,8 @@ class ClickerApp:
                 controller = mouse.Controller()
                 def move_fn(px, py):
                     controller.position = (px, py)
-                click_fn = send_click
+                def click_fn(button):
+                    send_click(button, duration=VISION_CLICK_DURATION, stop_event=stop_event)
                 mouse_down_fn = send_mouse_down
                 mouse_up_fn = send_mouse_up
             action_started = time.perf_counter()
@@ -2211,30 +2257,31 @@ class ClickerApp:
             score = float(getattr(result, "score", 0.0))
             action_ms = (time.perf_counter() - action_started) * 1000
             now = time.monotonic()
-            # Avoid making fast clicks wait for Tk on every frame. Actual
-            # mouse input above remains on the recognition worker.
+            # Throttle rendering only; the mailbox never waits for Tk.
             if now - self._vision_match_log_at >= 0.15:
                 self._vision_match_log_at = now
-                self.safe_after(self.vision_match_ui, name, score, x, y, generation, completed,
-                                engine.last_scan_ms, action_ms)
+                self._queue_vision_ui("status", self.vision_match_ui, name, score, x, y,
+                                      generation, completed, engine.last_scan_ms, action_ms,
+                                      generation=generation)
         except Exception as exc:
-            self.safe_after(self.on_vision_error, str(exc), generation)
+            self.on_vision_error(str(exc), generation)
 
     def vision_match_ui(self, name: str, score: float, x: int, y: int,
                         generation: Optional[int] = None, completed: int = 1,
                         scan_ms: Optional[float] = None, action_ms: Optional[float] = None):
-        if generation is not None and generation != self.vision_generation:
+        if self.closing or (generation is not None and generation != self.vision_generation):
             return
         timing = f" · 检测 {scan_ms:.0f} ms / 执行 {action_ms:.0f} ms" if scan_ms is not None and action_ms is not None else ""
-        self.vision_log_var.set(f"已执行 {completed} 次动作：{name} · 置信度 {score:.0%} · ({x}, {y}){timing}")
+        self.vision_log_var.set(f"已发送 {completed} 次动作：{name} · 置信度 {score:.0%} · ({x}, {y}){timing}")
         short_name = name if len(name) <= 12 else name[:12] + "…"
         self.vision_global_status.set(f"命中 · {short_name}")
 
     def on_vision_error(self, error, generation: Optional[int] = None):
-        self.safe_after(self._vision_error_ui, str(error), generation)
+        self._queue_vision_ui("error", self._vision_error_ui, str(error), generation,
+                              generation=generation)
 
     def _vision_error_ui(self, error: str, generation: Optional[int] = None):
-        if generation is not None and generation != self.vision_generation:
+        if self.closing or (generation is not None and generation != self.vision_generation):
             return
         self.vision_log_var.set(f"识别错误：{error}")
         self.set_status("图片识别出错", "danger")
@@ -4415,6 +4462,14 @@ class ClickerApp:
         if self.closing:
             return
         self.closing = True
+        if self._vision_ui_job is not None:
+            try:
+                self.root.after_cancel(self._vision_ui_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._vision_ui_job = None
+        with self._vision_ui_lock:
+            self._vision_ui_pending.clear()
         background_capture_job = getattr(self, "_background_capture_job", None)
         if background_capture_job is not None:
             try:

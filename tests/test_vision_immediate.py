@@ -171,14 +171,18 @@ def test_ui_runs_immediate_mode_and_keeps_saved_actions(app, monkeypatch, tmp_pa
     engine.capture_fn = lambda: frame_with(image)
     engine.scan_once()
     if background:
-        main.post_window_click.assert_called_once_with(123, 148, 80, "right")
+        main.post_window_click.assert_called_once_with(
+            123, 148, 80, "right", duration=main.VISION_CLICK_DURATION,
+            stop_event=engine.stop_event)
         main.post_window_mouse_down.assert_not_called()
     else:
-        main.send_click.assert_called_once_with("right")
+        main.send_click.assert_called_once_with(
+            "right", duration=main.VISION_CLICK_DURATION, stop_event=engine.stop_event)
         main.send_mouse_down.assert_not_called()
     assert app.vision_templates[0]["actions"] == saved_actions
     assert app.vision_templates[0]["cooldown"] == 60
-    app.root.update()
+    app.root.after(50, app.root.quit)
+    app.root.mainloop()
     assert "检测" in app.vision_log_var.get() and "执行" in app.vision_log_var.get()
     app.vision_immediate_var.set(False)
     app.change_vision_immediate()

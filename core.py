@@ -56,6 +56,12 @@ if platform.system() == "Windows":
         _anonymous_ = ("u",)
         _fields_ = [("type", ctypes.c_ulong), ("u", _INPUTUNION)]
 
+    # Preserve SendInput's thread-local error without changing how the other
+    # user32 calls above/below expose their errors to ctypes.WinError().
+    _send_input = ctypes.WinDLL("user32", use_last_error=True).SendInput
+    _send_input.argtypes = [ctypes.c_uint, ctypes.POINTER(_INPUT), ctypes.c_int]
+    _send_input.restype = ctypes.c_uint
+
     _INPUT_MOUSE = 0
     _MOUSEEVENTF_LEFTDOWN = 0x0002
     _MOUSEEVENTF_LEFTUP = 0x0004
@@ -118,6 +124,7 @@ if platform.system() == "Windows":
 else:
     _user32 = None
     _gdi32 = None
+    _send_input = None
 
 
 @dataclass(frozen=True)
@@ -271,18 +278,41 @@ def post_window_mouse_up(hwnd: int, x: int, y: int, button: str = "left") -> Non
 
 
 def post_window_click(hwnd: int, x: int, y: int, button: str = "left", *,
-                      double_click: bool = False) -> None:
+                      double_click: bool = False, duration: float = 0.0,
+                      stop_event: Optional[threading.Event] = None) -> None:
     """Post a client-area click without moving the cursor or activating it.
 
     ``double_click=True`` posts the second (DBLCLK) half of a double click;
-    callers should post a normal click first.
+    callers should post a normal click first. A positive ``duration`` keeps
+    the button down for applications that sample button state each frame.
+    The down event is sent immediately; cancellation releases it early.
     """
     if _user32 is None:
         raise OSError("background clicking is only supported on Windows")
-    post_window_mouse_move(hwnd, x, y)
-    _post_window_button(hwnd, x, y, button, pressed=True,
-                        double_click=double_click)
-    _post_window_button(hwnd, x, y, button, pressed=False)
+    duration = _click_duration(duration)
+    if stop_event is not None and stop_event.is_set():
+        return
+    # Resolve once: controls may move or disappear between down and up.
+    # Releasing at a newly hit-tested control could leave the first one held.
+    target, packed = _window_message_point(hwnd, x, y)
+    button = str(button).lower().replace("button.", "")
+    messages = {
+        "left": (0x0201, 0x0202, 0x0203, 0x0001),
+        "right": (0x0204, 0x0205, 0x0206, 0x0002),
+        "middle": (0x0207, 0x0208, 0x0209, 0x0010),
+    }
+    down, up, double, key_flag = messages.get(button, messages["left"])
+    if not _user32.PostMessageW(target, 0x0200, 0, packed):
+        raise ctypes.WinError()
+    if stop_event is not None and stop_event.is_set():
+        return
+    if not _user32.PostMessageW(target, double if double_click else down, key_flag, packed):
+        raise ctypes.WinError()
+    try:
+        _wait_click_duration(duration, stop_event)
+    finally:
+        if not _user32.PostMessageW(target, up, 0, packed):
+            raise ctypes.WinError()
 
 
 def capture_window_client(hwnd: int):
@@ -344,8 +374,32 @@ def capture_window_client(hwnd: int):
         _user32.ReleaseDC(hwnd, window_dc)
 
 
-def send_click(button: str = "left") -> None:
-    """Inject a single mouse click at the current cursor location."""
+def _click_duration(duration: float) -> float:
+    duration = float(duration)
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError("click duration must be a finite non-negative number")
+    return duration
+
+
+def _wait_click_duration(duration: float,
+                         stop_event: Optional[threading.Event]) -> None:
+    if duration > 0:
+        if stop_event is None:
+            time.sleep(duration)
+        else:
+            stop_event.wait(duration)
+
+
+def send_click(button: str = "left", *, duration: float = 0.0,
+               stop_event: Optional[threading.Event] = None) -> None:
+    """Press immediately, optionally hold briefly, then release the button.
+
+    The default duration preserves the normal clicker's maximum speed.
+    A stop event interrupts the hold while still guaranteeing release.
+    """
+    duration = _click_duration(duration)
+    if stop_event is not None and stop_event.is_set():
+        return
     # Keep the button state balanced even when a platform call raises.  A
     # failed ``SendInput`` should never leave a physical button held down and
     # blocking the user's normal mouse input after the worker exits.
@@ -360,7 +414,10 @@ def send_click(button: str = "left") -> None:
         except Exception:
             pass
         raise
-    send_mouse_up(button)
+    try:
+        _wait_click_duration(duration, stop_event)
+    finally:
+        send_mouse_up(button)
 
 
 def _mouse_flags(button: str) -> Tuple[int, int]:
@@ -380,8 +437,17 @@ def _send_mouse_flag(flag: int) -> None:
         raise OSError("send_click is only supported on Windows")
     inp = _INPUT(type=_INPUT_MOUSE,
                  mi=_MOUSEINPUT(0, 0, 0, flag, 0, 0))
-    if _user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
-        raise ctypes.WinError()
+    ctypes.set_last_error(0)
+    if _send_input(1, ctypes.byref(inp), ctypes.sizeof(_INPUT)) != 1:
+        error = ctypes.get_last_error()
+        if error:
+            raise ctypes.WinError(error)
+        # Windows does not reliably supply an error code when UIPI rejects
+        # input. WinError(0) would misleadingly say the operation succeeded.
+        raise OSError(
+            "SendInput 未能发送鼠标输入（系统未提供错误码）；"
+            "请检查目标窗口与连点器的权限是否一致。"
+        )
 
 
 def send_mouse_down(button: str = "left") -> None:

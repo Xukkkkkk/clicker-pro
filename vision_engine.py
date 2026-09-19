@@ -899,8 +899,10 @@ class VisionEngine:
     def scan_once(self, *, trigger: bool = True) -> list[VisionMatch]:
         """Capture and match all enabled templates once.
 
-        ``trigger=False`` always runs a full, read-only scan. Immediate mode
-        dispatches the first hit and recaptures before looking for another.
+        ``trigger=False`` always runs a full, read-only scan. Matches are
+        dispatched as soon as their template is searched. After a dispatch,
+        subsequent templates use a fresh capture because an action can change
+        the screen. Immediate mode returns after its first hit.
         """
         scan_started = time.perf_counter()
         cv2, np = _optional_backends()
@@ -920,6 +922,8 @@ class VisionEngine:
             offset = self._next_template % len(ordered)
             ordered = ordered[offset:] + ordered[:offset]
         pending_scales = []
+        dispatch_seconds = 0.0
+        refresh_frame = False
 
         def make_matches(selected, spec, search_x, search_y):
             now = time.time()
@@ -934,9 +938,12 @@ class VisionEngine:
             ) for score, px, py, tw, th in selected]
 
         def finish():
-            self.last_scan_ms = (time.perf_counter() - scan_started) * 1000
+            self.last_scan_ms = (time.perf_counter() - scan_started - dispatch_seconds) * 1000
             if trigger:
-                self._trigger(matches, templates)
+                if immediate:
+                    self._trigger(matches, templates)
+                else:
+                    self._notify_scan(matches)
             return matches
 
         for index, spec in ordered:
@@ -945,6 +952,16 @@ class VisionEngine:
             if not spec.enabled:
                 continue
             try:
+                if refresh_frame:
+                    capture_started = time.perf_counter()
+                    frame = self._capture()
+                    image = _as_bgr(frame.image, cv2, np)
+                    self.last_capture_ms += (time.perf_counter() - capture_started) * 1000
+                    excluded = tuple(self.exclude_regions() or ()) if self.exclude_regions else ()
+                    self._scan_images = {}
+                    refresh_frame = False
+                    if self.stop_event is not None and self.stop_event.is_set():
+                        break
                 prepared = self._get_prepared(spec, index, cv2, np)
                 search, search_x, search_y = _crop_absolute(
                     image, frame.origin_x, frame.origin_y,
@@ -972,7 +989,8 @@ class VisionEngine:
                     search_x, search_y, excluded, detail, cv2, np,
                     quick_only=immediate, maximum=1 if immediate else None,
                 )
-                matches.extend(make_matches(selected, spec, search_x, search_y))
+                current_matches = make_matches(selected, spec, search_x, search_y)
+                matches.extend(current_matches)
                 if immediate:
                     if matches:
                         # Click before any absent/slow template is searched,
@@ -981,6 +999,15 @@ class VisionEngine:
                         return finish()
                     pending_scales.append((index, spec, source, template_image,
                                            prepared, threshold, search_x, search_y, detail))
+                elif trigger and current_matches:
+                    # Do not leave a known target waiting behind expensive
+                    # searches for other templates. Cooldowns remain enforced
+                    # by _trigger; only an actual callback/input invalidates
+                    # this frame for the following template.
+                    dispatch_started = time.perf_counter()
+                    self.last_scan_ms = (dispatch_started - scan_started - dispatch_seconds) * 1000
+                    refresh_frame = self._trigger(current_matches, templates, notify=False)
+                    dispatch_seconds += time.perf_counter() - dispatch_started
             except Exception as exc:
                 self._report_error(exc)
         if immediate and pending_scales:
@@ -1309,9 +1336,9 @@ class VisionEngine:
         return prepared
 
     def _trigger(self, matches: list[VisionMatch],
-                 templates: list[TemplateSpec]) -> None:
-        if not self.immediate_click:
-            self._notify_scan(matches)
+                 templates: list[TemplateSpec], *, notify: bool = True) -> bool:
+        """Dispatch eligible matches and report whether the frame may change."""
+        dispatched = False
         spec_by_key = {spec.key: spec for spec in templates}
         for match in matches:
             if self.stop_event is not None and self.stop_event.is_set():
@@ -1321,6 +1348,7 @@ class VisionEngine:
                 continue
             dispatch_started = time.perf_counter()
             if self.auto_click and spec.click:
+                dispatched = True
                 try:
                     if self.click_fn:
                         self.click_fn(match)
@@ -1336,13 +1364,15 @@ class VisionEngine:
                 except Exception as exc:
                     self._report_error(exc)
             if self.on_match:
+                dispatched = True
                 try:
                     self.on_match(match)
                 except Exception as exc:
                     self._report_error(exc)
             self.last_dispatch_ms = (time.perf_counter() - dispatch_started) * 1000
-        if self.immediate_click:
+        if notify:
             self._notify_scan(matches)
+        return dispatched
 
     def _notify_scan(self, matches):
         if self.on_scan:

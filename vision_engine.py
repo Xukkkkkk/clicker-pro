@@ -651,6 +651,7 @@ class _PreparedTemplate:
     image: Any
     width: int
     height: int
+    preferred_scale: float = 1.0
 
 
 class VisionEngine:
@@ -680,6 +681,7 @@ class VisionEngine:
         on_error: Optional[Callable[[BaseException], None]] = None,
         on_done: Optional[Callable[[], None]] = None,
         prefer_mss: bool = True,
+        exclude_regions: Optional[Callable[[], Sequence[Region]]] = None,
     ):
         self.interval = max(0.01, float(interval))
         self.threshold = _validate_threshold(threshold)
@@ -696,6 +698,8 @@ class VisionEngine:
         self.on_error = on_error
         self.on_done = on_done
         self.capturer = ScreenCapturer(prefer_mss=prefer_mss)
+        self.exclude_regions = exclude_regions
+        self.last_scan_details: list[dict[str, Any]] = []
 
         self._lock = threading.RLock()
         self._templates: list[TemplateSpec] = []
@@ -880,8 +884,11 @@ class VisionEngine:
         identical.
         """
         cv2, np = _optional_backends()
+        self.last_error = None
+        self.last_scan_details = []
         frame = self._capture()
         image = _as_bgr(frame.image, cv2, np)
+        excluded = tuple(self.exclude_regions() or ()) if self.exclude_regions else ()
         matches: list[VisionMatch] = []
         with self._lock:
             templates = list(self._templates)
@@ -894,7 +901,12 @@ class VisionEngine:
                     image, frame.origin_x, frame.origin_y,
                     spec.region or self.region, np,
                 )
+                detail = {"name": spec.name or spec.key, "score": 0.0,
+                          "scale": 1.0, "threshold": spec.threshold,
+                          "frame_size": (int(image.shape[1]), int(image.shape[0]))}
+                self.last_scan_details.append(detail)
                 if search.size == 0:
+                    detail["reason"] = "识别区域在截图范围之外"
                     continue
                 source = search
                 template_image = prepared.image
@@ -905,64 +917,13 @@ class VisionEngine:
                 if spec.grayscale:
                     source = self._to_gray(source, cv2)
                     template_image = self._to_gray(template_image, cv2)
-                sh, sw = int(source.shape[0]), int(source.shape[1])
-                th, tw = prepared.height, prepared.width
-                if th > sh or tw > sw:
-                    continue
                 threshold = _validate_threshold(spec.threshold, self.threshold)
-                # CCOEFF_NORMED is a strong default for normal icons.  Its
-                # denominator becomes zero for a uniform (solid-colour)
-                # template, however, and OpenCV then reports a misleading 1
-                # over much of the screen.  SQDIFF_NORMED has the opposite
-                # score direction and remains meaningful in that case.
-                if len(template_image.shape) == 2:
-                    template_variance = float(np.std(template_image))
-                else:
-                    # Colour channels may have different constant values
-                    # (e.g. a solid blue icon), so measure variation over
-                    # spatial axes rather than across channels.
-                    template_variance = float(
-                        np.max(np.std(template_image, axis=(0, 1)))
-                    )
-                low_is_better = template_variance < 1e-6
-                method = cv2.TM_SQDIFF_NORMED if low_is_better else cv2.TM_CCOEFF_NORMED
-                result = cv2.matchTemplate(source, template_image, method)
-                candidate_limit = max(5000, int(spec.max_matches) * 2000)
-                if low_is_better:
-                    locations = np.argwhere(result <= (1.0 - threshold))
-                else:
-                    locations = np.argwhere(result >= threshold)
-                if locations.size == 0:
-                    continue
-                # A low threshold can produce millions of locations on a
-                # 4K desktop.  Keep only the best candidates before sorting;
-                # non-maximum suppression below then picks the requested
-                # distinct occurrences.
-                if len(locations) > candidate_limit:
-                    values = result[locations[:, 0], locations[:, 1]]
-                    if low_is_better:
-                        keep = np.argpartition(values, candidate_limit - 1)[:candidate_limit]
-                    else:
-                        keep = np.argpartition(values, -candidate_limit)[-candidate_limit:]
-                    locations = locations[keep]
-                candidates = [
-                    (float(1.0 - result[int(y), int(x)]) if low_is_better
-                     else float(result[int(y), int(x)]), int(x), int(y))
-                    for y, x in locations
-                ]
-                candidates.sort(key=lambda item: item[0], reverse=True)
-                selected: list[tuple[float, int, int]] = []
-                for candidate in candidates:
-                    score, px, py = candidate
-                    rect = (px, py, tw, th)
-                    if any(_rect_iou(rect, (sx, sy, tw, th)) > 0.30
-                           for _, sx, sy in selected):
-                        continue
-                    selected.append(candidate)
-                    if len(selected) >= max(1, int(spec.max_matches)):
-                        break
+                selected = self._match_scaled(
+                    source, template_image, prepared, threshold,
+                    search_x, search_y, excluded, detail, cv2, np,
+                )
                 now = time.time()
-                for score, px, py in selected:
+                for score, px, py, tw, th in selected:
                     abs_x, abs_y = search_x + px, search_y + py
                     center_x = abs_x + tw // 2
                     center_y = abs_y + th // 2
@@ -986,6 +947,121 @@ class VisionEngine:
         if trigger:
             self._trigger(matches, templates)
         return matches
+
+    @staticmethod
+    def _score_map(source, template, cv2, np):
+        variance = float(np.max(np.std(template, axis=(0, 1))))
+        if variance < 1e-6:
+            # Normalized correlation is undefined for constant templates.
+            return 1.0 - cv2.matchTemplate(source, template, cv2.TM_SQDIFF_NORMED)
+        return cv2.matchTemplate(source, template, cv2.TM_CCOEFF_NORMED)
+
+    @staticmethod
+    def _exclude_scores(scores, width, height, origin_x, origin_y, excluded):
+        for left, top, region_width, region_height in excluded:
+            # Exclude all candidate rectangles touching our UI before taking
+            # the best N; otherwise a preview can consume the only match slot.
+            x0 = max(0, left - origin_x - width + 1)
+            y0 = max(0, top - origin_y - height + 1)
+            x1 = min(scores.shape[1], left + region_width - origin_x)
+            y1 = min(scores.shape[0], top + region_height - origin_y)
+            if x1 > x0 and y1 > y0:
+                scores[y0:y1, x0:x1] = -1.0
+
+    def _match_scaled(self, source, template, prepared, threshold,
+                      origin_x, origin_y, excluded, detail, cv2, np):
+        selected = []
+        attempted = set()
+        maximum = max(1, int(prepared.spec.max_matches))
+        sh, sw = source.shape[:2]
+        stop = self.stop_event
+
+        def attempt(scale):
+            if stop is not None and stop.is_set():
+                return
+            tw = max(2, round(prepared.width * scale))
+            th = max(2, round(prepared.height * scale))
+            if (tw, th) in attempted or tw > sw or th > sh:
+                return
+            attempted.add((tw, th))
+            resized = template if (tw, th) == (prepared.width, prepared.height) else cv2.resize(
+                template, (tw, th), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+            scores = self._score_map(source, resized, cv2, np)
+            self._exclude_scores(scores, tw, th, origin_x, origin_y, excluded)
+            scores = np.nan_to_num(scores, nan=-1.0, posinf=-1.0, neginf=-1.0)
+            best = cv2.minMaxLoc(scores)[1]
+            if best > detail["score"]:
+                detail.update(score=float(best), scale=float(scale))
+            # Greedy peaks avoid allocating millions of threshold locations
+            # on large desktops or on nearly uniform templates.
+            for _ in range(maximum * 4):
+                _, score, _, (px, py) = cv2.minMaxLoc(scores)
+                if score < threshold:
+                    break
+                rect = (px, py, tw, th)
+                if not any(_rect_iou(rect, (sx, sy, w, h)) > 0.30
+                           for _, sx, sy, w, h in selected):
+                    selected.append((float(score), px, py, tw, th))
+                    prepared.preferred_scale = scale
+                scores[max(0, py-th//2):py+th//2+1,
+                       max(0, px-tw//2):px+tw//2+1] = -1.0
+                if len(selected) >= maximum:
+                    break
+
+        attempt(prepared.preferred_scale)
+        if len(selected) < maximum:
+            attempt(1.0)
+        if len(selected) >= maximum:
+            return selected
+
+        # Search 50%-200% in a small image, then verify only the three best
+        # scales against the original pixels and the unchanged threshold.
+        # This bounds expensive full-resolution matching on 4K monitors.
+        ratio = min(1.0, 800.0 / max(sw, sh))
+        small_source = self._to_gray(source, cv2)
+        if ratio < 1:
+            small_source = cv2.resize(small_source, (round(sw*ratio), round(sh*ratio)),
+                                      interpolation=cv2.INTER_AREA)
+        gray_template = self._to_gray(template, cv2)
+        ranking = []
+        sizes = set()
+        for step in range(20, 81):
+            if stop is not None and stop.is_set():
+                break
+            scale = step / 40.0
+            tw, th = round(prepared.width*scale), round(prepared.height*scale)
+            w, h = max(2, round(tw*ratio)), max(2, round(th*ratio))
+            if (w, h) in sizes or tw > sw or th > sh or w > small_source.shape[1] or h > small_source.shape[0]:
+                continue
+            sizes.add((w, h))
+            small_template = cv2.resize(gray_template, (w, h),
+                                        interpolation=cv2.INTER_AREA if scale*ratio < 1 else cv2.INTER_LINEAR)
+            scores = self._score_map(small_source, small_template, cv2, np)
+            small_excluded = [(round((x-origin_x)*ratio), round((y-origin_y)*ratio),
+                               math.ceil(width*ratio), math.ceil(height*ratio))
+                              for x, y, width, height in excluded]
+            self._exclude_scores(scores, w, h, 0, 0, small_excluded)
+            ranking.append((cv2.minMaxLoc(scores)[1], scale))
+        for _, scale in sorted(ranking, reverse=True)[:3]:
+            attempt(scale)
+            if len(selected) >= maximum:
+                break
+        if not attempted:
+            detail["reason"] = "模板比截图大，请检查目标窗口大小"
+        elif float(np.max(np.std(source, axis=(0, 1)))) < 1:
+            detail["reason"] = "截图为空白或纯色，请确认窗口未最小化且内容已显示"
+        return sorted(selected, reverse=True)[:maximum]
+
+    def scan_summary(self) -> str:
+        """A useful no-match diagnostic without changing matching thresholds."""
+        if not self.last_scan_details:
+            return "没有可扫描的目标"
+        best = max(self.last_scan_details, key=lambda item: item["score"])
+        if best.get("reason"):
+            return best["reason"]
+        width, height = best["frame_size"]
+        return (f"最高匹配度 {best['score']:.0%} / 阈值 {best['threshold']:.0%}"
+                f" · 缩放 {best['scale']:.0%} · 截图 {width}×{height}")
 
     def _capture(self) -> ScreenFrame:
         if self.capture_fn is None:

@@ -96,6 +96,20 @@ HOTKEY_LABELS = {
     "pause": "暂停 / 继续连点",
     "play": "开始 / 停止回放",
 }
+HOTKEY_DESCRIPTIONS = {
+    "toggle": "全局启动或停止自动点击任务",
+    "record": "记录鼠标操作轨迹与按键动作",
+    "stop": "一键紧急停止全部运行中的自动化任务",
+    "pause": "临时暂停或继续连点，保持已执行计数",
+    "play": "循环回放已录制的鼠标动作序列",
+}
+HOTKEY_ICONS = {
+    "toggle": "⚡",
+    "record": "⏺",
+    "stop": "⏹",
+    "pause": "⏸",
+    "play": "▶",
+}
 
 
 def enable_process_dpi_awareness() -> None:
@@ -287,9 +301,27 @@ class ClickerApp:
                              font=("Microsoft YaHei UI", 9))
         self.style.map("Mode.TRadiobutton", background=[("selected", COLORS["selection"])],
                        foreground=[("selected", COLORS["accent"])])
+        self.style.configure(
+            "Keycap.TEntry",
+            fieldbackground=COLORS.get("keycap_bg", COLORS["surface_hover"]),
+            background=COLORS.get("keycap_bg", COLORS["surface_hover"]),
+            foreground=COLORS.get("keycap_text", COLORS["accent"]),
+            bordercolor=COLORS.get("keycap_border", COLORS["border"]),
+            lightcolor=COLORS.get("keycap_border", COLORS["border"]),
+            darkcolor=COLORS.get("keycap_border", COLORS["border"]),
+            insertcolor=COLORS["accent"],
+            selectbackground=COLORS["selection"],
+            selectforeground=COLORS["accent"],
+            padding=(8, 5),
+            font=("Segoe UI", 10, "bold"),
+        )
+        self.style.map("Keycap.TEntry",
+                       bordercolor=[("focus", COLORS["border_focus"])],
+                       lightcolor=[("focus", COLORS["border_focus"])],
+                       darkcolor=[("focus", COLORS["border_focus"])])
         if not hasattr(self, "ui_images"):
             self.ui_images = {}
-        for name in ("click", "record", "vision", "hotkeys", "import", "export", "clear", "save"):
+        for name in ("click", "record", "vision", "hotkeys", "import", "export", "clear", "save", "reset"):
             color = COLORS["sidebar_text"] if name in {"click", "record", "vision", "hotkeys"} else COLORS["text_secondary"]
             self.ui_images[name] = symbol_image(
                 self.root, name, color, existing=self.ui_images.get(name))
@@ -316,7 +348,7 @@ class ClickerApp:
     def build_ui(self):
         shell = ttk.Frame(self.root, style="App.TFrame")
         shell.pack(fill="both", expand=True)
-        self.sidebar = ttk.Frame(shell, style="Sidebar.TFrame", width=194)
+        self.sidebar = ttk.Frame(shell, style="Sidebar.TFrame", width=204)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False)
         self.content = ttk.Frame(shell, style="Page.TFrame")
@@ -335,74 +367,142 @@ class ClickerApp:
 
     def build_sidebar(self):
         brand = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
-        brand.pack(fill="x", padx=22, pady=(30, 32))
+        brand.pack(fill="x", padx=20, pady=(26, 24))
         brand_text = ttk.Frame(brand, style="Sidebar.TFrame")
         brand_text.pack(side="left")
         ttk.Label(brand_text, text="Clicker Pro", style="Brand.TLabel").pack(anchor="w")
-        ttk.Label(brand_text, text="AUTOMATION WORKSPACE", style="SidebarText.TLabel", font=("Segoe UI", 7)).pack(anchor="w", pady=(5, 0))
-        ttk.Label(self.sidebar, text="工作区", style="SidebarText.TLabel").pack(anchor="w", padx=22, pady=(0, 8))
+        ttk.Label(brand_text, text="AUTOMATION WORKSPACE", style="SidebarText.TLabel", font=("Segoe UI", 7)).pack(anchor="w", pady=(4, 0))
+        ttk.Label(self.sidebar, text="工作区导航", style="SidebarText.TLabel").pack(anchor="w", padx=20, pady=(0, 8))
         self.nav_buttons: dict[str, ttk.Button] = {}
-        for name, label in (("click", "  连点控制"), ("record", "  录制与回放"), ("vision", "  图片识别"), ("hotkeys", "  设置")):
+        for name, label in (("click", "  连点控制"), ("record", "  录制与回放"), ("vision", "  图片识别"), ("hotkeys", "  快捷键设置")):
             button = ttk.Button(self.sidebar, text=label, image=self.ui_images[name], compound="left", style="Nav.TButton", command=lambda page=name: self.show_page(page))
-            button.pack(fill="x", padx=12, pady=4)
+            button.pack(fill="x", padx=12, pady=3)
             self.nav_buttons[name] = button
         spacer = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
         spacer.pack(fill="both", expand=True)
-        tip = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
-        tip.pack(fill="x", padx=20, pady=(0, 24))
-        ttk.Separator(tip).pack(fill="x", pady=(0, 14))
+
+        tip = bind_theme(tk.Frame(self.sidebar, padx=12, pady=10), bg="sidebar_selected")
+        tip.pack(fill="x", padx=12, pady=(0, 14))
+
+        tip_head = bind_theme(tk.Frame(tip), bg="sidebar_selected")
+        tip_head.pack(fill="x", pady=(0, 8))
+        bind_theme(tk.Label(tip_head, text="⌨  快捷键速查", font=("Microsoft YaHei UI", 9, "bold")),
+                   bg="sidebar_selected", fg="sidebar_text").pack(side="left")
+        cfg_link = bind_theme(tk.Label(tip_head, text="修改 ›", font=("Microsoft YaHei UI", 8), cursor="hand2"),
+                              bg="sidebar_selected", fg="accent")
+        cfg_link.pack(side="right")
+        cfg_link.bind("<Button-1>", lambda _e: self.show_page("hotkeys"))
+        Tooltip(cfg_link, "点击跳转至快捷键设置页")
+
+        self.sidebar_hotkey_badges: dict[str, tk.Label] = {}
+        for key, name in (
+            ("toggle", "连点开关"),
+            ("pause", "暂停/继续"),
+            ("record", "录制开关"),
+            ("play", "回放开关"),
+            ("stop", "停止全部"),
+        ):
+            row = bind_theme(tk.Frame(tip), bg="sidebar_selected")
+            row.pack(fill="x", pady=2)
+            badge = bind_theme(tk.Label(row, text=self.display_hotkey(self.hotkey_specs.get(key, "")),
+                                        font=("Segoe UI", 8, "bold"), padx=5, pady=1, relief="solid", bd=1),
+                               bg="sidebar", fg="accent", highlightbackground="sidebar_hover")
+            badge.pack(side="left")
+            self.sidebar_hotkey_badges[key] = badge
+            lbl = bind_theme(tk.Label(row, text=name, font=("Microsoft YaHei UI", 8)),
+                             bg="sidebar_selected", fg="sidebar_muted")
+            lbl.pack(side="right")
+
         self.hotkey_tip_var = tk.StringVar(value=self.hotkey_tip_text())
-        ttk.Label(tip, textvariable=self.hotkey_tip_var, style="SidebarText.TLabel", justify="left").pack(anchor="w")
-        ttk.Label(tip, text="本地工作区", style="SidebarText.TLabel").pack(anchor="w", pady=(18, 0))
+        footer_tip = bind_theme(tk.Label(self.sidebar, text="Clicker Pro · 本地自动化就绪",
+                                         font=("Microsoft YaHei UI", 8)),
+                                bg="sidebar", fg="sidebar_muted")
+        footer_tip.pack(anchor="w", padx=16, pady=(0, 14))
 
     def build_header(self):
         header = ttk.Frame(self.content, style="Page.TFrame")
-        header.pack(fill="x", padx=24, pady=(20, 10))
+        header.pack(fill="x", padx=24, pady=(18, 10))
         left = ttk.Frame(header, style="Page.TFrame")
         left.pack(side="left", fill="x", expand=True)
         self.page_title_var = tk.StringVar(value="连点控制")
         self.page_subtitle_var = tk.StringVar(value="调整点击频率、鼠标位置和运行方式")
         ttk.Label(left, textvariable=self.page_title_var, style="Title.TLabel").pack(anchor="w")
-        ttk.Label(left, textvariable=self.page_subtitle_var, style="Subtitle.TLabel").pack(anchor="w", pady=(5, 0))
+        ttk.Label(left, textvariable=self.page_subtitle_var, style="Subtitle.TLabel").pack(anchor="w", pady=(4, 0))
         right = ttk.Frame(header, style="Page.TFrame")
         right.pack(side="right")
-        self.status_pill = tk.Label(right, text="●  准备就绪", bg=COLORS["surface_hover"], fg=COLORS["text_secondary"], padx=12, pady=6, font=("Segoe UI Semibold", 9))
+        self.status_pill = bind_theme(tk.Label(right, text="●  准备就绪", padx=12, pady=5,
+                                               font=("Segoe UI Semibold", 9), relief="solid", bd=1),
+                                      bg="surface_hover", fg="text_secondary", highlightbackground="border")
         self.status_pill.pack(side="left", padx=(0, 10))
-        self.header_stop_button = ttk.Button(right, text="停止全部", style="Danger.TButton", command=self.stop_all)
+
+        stop_box = ttk.Frame(right, style="Page.TFrame")
+        stop_box.pack(side="left")
+        self.header_stop_button = ttk.Button(stop_box, text="停止全部", style="Danger.TButton", command=self.stop_all)
         self.header_stop_button.pack(side="left")
+        self.stop_hotkey_badge = bind_theme(tk.Label(stop_box, text=self.display_hotkey(self.hotkey_specs.get("stop", "")),
+                                                     font=("Segoe UI", 8, "bold"), padx=5, pady=1, relief="solid", bd=1),
+                                            bg="danger_surface", fg="danger", highlightbackground="danger_border")
+        self.stop_hotkey_badge.pack(side="left", padx=(4, 0))
+        Tooltip(self.stop_hotkey_badge, "停止全部任务快捷键 (可在设置中修改)")
+
         for name, title, command in (("import", "导入配置", self.import_profile), ("export", "导出配置", self.export_profile)):
             button = ttk.Button(right, image=self.ui_images[name], style="Icon.TButton", command=command)
             button.pack(side="left", padx=(6, 0))
             Tooltip(button, title)
 
+    def _apply_click_preset(self, ms: str, rand: bool):
+        self.interval_var.set(ms)
+        self.random_var.set(rand)
+        if rand:
+            self.random_percent_var.set("20")
+        self.set_status(f"已应用点击预设：{ms}ms {'(开启防检测)' if rand else ''}", "success")
+
     def build_click_page(self):
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["click"] = page
-        hero = ttk.Frame(page, style="Card.TFrame", padding=(0, 4))
-        hero.pack(fill="x", pady=(0, 8))
+        hero = ttk.Frame(page, style="Card.TFrame", padding=(14, 10))
+        hero.pack(fill="x", pady=(0, 10))
         hero_left = ttk.Frame(hero, style="CardInner.TFrame")
         hero_left.pack(side="left", fill="x", expand=True)
         ttk.Label(hero_left, text="任务配置", style="HeroTitle.TLabel").pack(anchor="w")
+        ttk.Label(hero_left, text="支持极速连点 · 随机防检测 · 多目标后台静默点击", style="Hint.TLabel").pack(anchor="w", pady=(2, 0))
+
+        start_box = ttk.Frame(hero, style="CardInner.TFrame")
+        start_box.pack(side="right", padx=(12, 0))
+        self.start_button = ttk.Button(start_box, text="▶  开始连点", style="Primary.TButton", command=self.toggle_clicking)
+        self.start_button.pack(side="left")
+        self.start_hotkey_badge = bind_theme(tk.Label(start_box, text=self.display_hotkey(self.hotkey_specs.get("toggle", "")),
+                                                      font=("Segoe UI", 9, "bold"), padx=6, pady=3,
+                                                      relief="solid", bd=1),
+                                             bg="keycap_bg", fg="keycap_text", highlightbackground="keycap_border")
+        self.start_hotkey_badge.pack(side="left", padx=(5, 0))
+        Tooltip(self.start_hotkey_badge, "连点全局快捷键 (可在设置中修改)")
+
+        pause_box = ttk.Frame(hero, style="CardInner.TFrame")
+        pause_box.pack(side="right", padx=(6, 0))
         self.pause_button = ttk.Button(
-            hero, text="Ⅱ  暂停", style="Compact.TButton",
+            pause_box, text="Ⅱ  暂停", style="Compact.TButton",
             command=self.toggle_pause, state="disabled",
         )
-        self.pause_button.pack(side="right", padx=(10, 0))
-        self.start_button = ttk.Button(hero, text="▶  开始连点", style="Primary.TButton", command=self.toggle_clicking)
-        self.start_button.pack(side="right", padx=(18, 0))
+        self.pause_button.pack(side="left")
+        self.pause_hotkey_badge = bind_theme(tk.Label(pause_box, text=self.display_hotkey(self.hotkey_specs.get("pause", "")),
+                                                      font=("Segoe UI", 8, "bold"), padx=5, pady=2,
+                                                      relief="solid", bd=1),
+                                             bg="keycap_bg", fg="text_secondary", highlightbackground="keycap_border")
+        self.pause_hotkey_badge.pack(side="left", padx=(4, 0))
+        Tooltip(self.pause_hotkey_badge, "暂停/继续全局快捷键")
+
         ttk.Separator(page).pack(fill="x", pady=(0, 12))
 
         body = ttk.Frame(page, style="Page.TFrame")
         body.pack(fill="x")
-        # Let the parameter card and the position card use their natural
-        # widths; a shared uniform group wastes space on smaller displays.
         body.columnconfigure(0, weight=1, uniform="click-settings")
         body.columnconfigure(1, weight=1, uniform="click-settings")
-        params = ttk.Frame(body, style="Card.TFrame", padding=(0, 0, 18, 0))
-        params.grid(row=0, column=0, sticky="nsew")
-        target = ttk.Frame(body, style="Card.TFrame", padding=(18, 0, 0, 0))
-        target.grid(row=0, column=1, sticky="nsew")
-        ttk.Label(params, text="点击参数", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 12))
+        params = ttk.Frame(body, style="Card.TFrame", padding=(16, 14, 16, 14))
+        params.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        target = ttk.Frame(body, style="Card.TFrame", padding=(16, 14, 16, 14))
+        target.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ttk.Label(params, text="点击参数", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
         params.columnconfigure(0, weight=1)
         params.columnconfigure(1, weight=1)
 
@@ -414,42 +514,67 @@ class ClickerApp:
         self.delay_var = tk.StringVar(value="0")
         self.random_percent_var = tk.StringVar(value="20")
         self.run_duration_var = tk.StringVar(value="0")
+        self.restore_cursor_var = tk.BooleanVar(value=False)
         self.random_range_hint_var = tk.StringVar(value="80–120%")
         ttk.Label(params, text="点击间隔", style="Muted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 6))
         ttk.Label(params, text="点击次数", style="Muted.TLabel").grid(row=1, column=1, sticky="w", padx=14, pady=(0, 6))
         interval_box = ttk.Frame(params, style="CardInner.TFrame")
-        interval_box.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        interval_box.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         interval_box.columnconfigure(0, weight=1)
         ttk.Entry(interval_box, textvariable=self.interval_var, width=8).grid(row=0, column=0, sticky="ew")
         ttk.Label(interval_box, text="ms", style="Muted.TLabel").grid(row=0, column=1, padx=(8, 0))
         count_box = ttk.Frame(params, style="CardInner.TFrame")
-        count_box.grid(row=2, column=1, sticky="ew", padx=(14, 0), pady=(0, 12))
+        count_box.grid(row=2, column=1, sticky="ew", padx=(14, 0), pady=(0, 8))
         count_box.columnconfigure(0, weight=1)
         ttk.Entry(count_box, textvariable=self.count_var, width=6).grid(row=0, column=0, sticky="ew")
         ttk.Label(count_box, text="0 = 无限", style="Muted.TLabel").grid(row=0, column=1, padx=(8, 0))
-        ttk.Label(params, text="鼠标按键", style="Muted.TLabel").grid(row=3, column=0, sticky="w", pady=(0, 6))
-        ttk.Label(params, text="点击方式", style="Muted.TLabel").grid(row=3, column=1, sticky="w", padx=14, pady=(0, 6))
-        ttk.Combobox(params, textvariable=self.click_button_var, values=["左键", "右键", "中键"], state="readonly", width=8).grid(row=4, column=0, sticky="ew", pady=(0, 16))
-        ttk.Combobox(params, textvariable=self.click_mode_var, values=["单击", "双击"], state="readonly", width=8).grid(row=4, column=1, sticky="ew", padx=(14, 0), pady=(0, 16))
-        ttk.Label(params, text="开始前延时", style="Muted.TLabel").grid(row=5, column=0, sticky="w", pady=(0, 6))
-        ttk.Label(params, text="随机间隔", style="Muted.TLabel").grid(row=5, column=1, sticky="w", padx=14, pady=(0, 6))
+
+        presets_bar = ttk.Frame(params, style="CardInner.TFrame")
+        presets_bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        ttk.Label(presets_bar, text="常用预设:", style="Hint.TLabel").pack(side="left", padx=(0, 6))
+        for p_label, p_ms, p_rand in (
+            ("10ms (极速)", "10", False),
+            ("50ms (常用)", "50", False),
+            ("100ms (标准)", "100", False),
+            ("防检测 (±20%)", "100", True),
+        ):
+            p_btn = ttk.Button(presets_bar, text=p_label, style="Compact.TButton",
+                               command=lambda ms=p_ms, r=p_rand: self._apply_click_preset(ms, r))
+            p_btn.pack(side="left", padx=(0, 4))
+
+        ttk.Label(params, text="鼠标按键", style="Muted.TLabel").grid(row=4, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(params, text="点击方式", style="Muted.TLabel").grid(row=4, column=1, sticky="w", padx=14, pady=(0, 6))
+        ttk.Combobox(params, textvariable=self.click_button_var, values=["左键", "右键", "中键"], state="readonly", width=8).grid(row=5, column=0, sticky="ew", pady=(0, 14))
+        ttk.Combobox(params, textvariable=self.click_mode_var, values=["单击", "双击"], state="readonly", width=8).grid(row=5, column=1, sticky="ew", padx=(14, 0), pady=(0, 14))
+        ttk.Label(params, text="开始前延时", style="Muted.TLabel").grid(row=6, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(params, text="随机间隔", style="Muted.TLabel").grid(row=6, column=1, sticky="w", padx=14, pady=(0, 6))
         delay_box = ttk.Frame(params, style="CardInner.TFrame")
-        delay_box.grid(row=6, column=0, sticky="ew")
+        delay_box.grid(row=7, column=0, sticky="ew")
         delay_box.columnconfigure(0, weight=1)
         ttk.Entry(delay_box, textvariable=self.delay_var, width=8).grid(row=0, column=0, sticky="ew")
         ttk.Label(delay_box, text="秒", style="Muted.TLabel").grid(row=0, column=1, padx=(8, 0))
         random_box = ttk.Frame(params, style="CardInner.TFrame")
-        random_box.grid(row=6, column=1, sticky="ew", padx=(14, 0))
+        random_box.grid(row=7, column=1, sticky="ew", padx=(14, 0))
         ttk.Checkbutton(random_box, text="±", variable=self.random_var).pack(side="left")
         self.random_percent_entry = ttk.Entry(random_box, textvariable=self.random_percent_var, width=5)
         self.random_percent_entry.pack(side="left", padx=(4, 3))
         ttk.Label(random_box, text="%", style="Muted.TLabel").pack(side="left")
-        ttk.Label(params, textvariable=self.random_range_hint_var, style="Hint.TLabel").grid(row=7, column=1, sticky="w", padx=(14, 0), pady=(4, 4))
+        ttk.Label(params, textvariable=self.random_range_hint_var, style="Hint.TLabel").grid(row=8, column=1, sticky="w", padx=(14, 0), pady=(4, 4))
         self.random_percent_var.trace_add("write", self._update_random_range_hint)
         self.random_var.trace_add("write", self._update_random_range_state)
         self._update_random_range_state()
 
-        ttk.Label(target, text="点击位置", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
+        runtime_box = ttk.Frame(params, style="CardInner.TFrame")
+        runtime_box.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(runtime_box, text="运行时限", style="Muted.TLabel").pack(side="left", padx=(0, 10))
+        ttk.Entry(runtime_box, textvariable=self.run_duration_var, width=8).pack(side="left")
+        ttk.Label(runtime_box, text="s", style="Hint.TLabel").pack(side="left", padx=(3, 0))
+        ttk.Label(runtime_box, text="0 = 不限", style="Hint.TLabel").pack(side="left", padx=(10, 0))
+        ttk.Checkbutton(params, text="完成后恢复鼠标位置", variable=self.restore_cursor_var).grid(
+            row=10, column=0, columnspan=2, sticky="w", pady=(8, 0)
+        )
+
+        ttk.Label(target, text="点击位置与目标", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
         self.position_var = tk.StringVar(value="跟随鼠标当前位置")
         ttk.Radiobutton(target, text="跟随鼠标当前位置", variable=self.position_var, value="跟随鼠标当前位置", command=self.update_position_state).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 7))
         ttk.Radiobutton(target, text="固定坐标", variable=self.position_var, value="固定坐标", command=self.update_position_state).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 8))
@@ -464,7 +589,6 @@ class ClickerApp:
             wraplength=210,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(4, 8))
         self.x_var, self.y_var = tk.StringVar(value="0"), tk.StringVar(value="0")
-        self.restore_cursor_var = tk.BooleanVar(value=False)
         xy = ttk.Frame(target, style="CardInner.TFrame")
         xy.grid(row=6, column=0, columnspan=2, sticky="ew")
         xy.columnconfigure(1, weight=1)
@@ -479,21 +603,12 @@ class ClickerApp:
             target, text="⌖  获取当前鼠标坐标", command=self.capture_position,
         )
         self.capture_position_button.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        ttk.Checkbutton(params, text="完成后恢复鼠标位置", variable=self.restore_cursor_var).grid(
-            row=9, column=0, columnspan=2, sticky="w", pady=(6, 0)
-        )
-        runtime_box = ttk.Frame(params, style="CardInner.TFrame")
-        runtime_box.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        ttk.Label(runtime_box, text="运行时限", style="Muted.TLabel").pack(side="left", padx=(0, 10))
-        ttk.Entry(runtime_box, textvariable=self.run_duration_var, width=8).pack(side="left")
-        ttk.Label(runtime_box, text="s", style="Hint.TLabel").pack(side="left", padx=(3, 0))
-        ttk.Label(runtime_box, text="0 = 不限", style="Hint.TLabel").pack(side="left", padx=(10, 0))
         target.columnconfigure(0, weight=1)
         target.columnconfigure(1, weight=1)
 
         ttk.Separator(page).pack(fill="x", pady=(12, 0))
-        stats = ttk.Frame(page, style="Card.TFrame", padding=(0, 10))
-        stats.pack(fill="x")
+        stats = ttk.Frame(page, style="Card.TFrame", padding=(16, 12))
+        stats.pack(fill="x", pady=(4, 0))
         self.stat_vars: dict[str, tk.StringVar] = {}
         for i, (key, title, value) in enumerate((("clicks", "本次点击", "0"), ("elapsed", "运行时长", "00:00"), ("rate", "实际速度", "等待开始"))):
             if i:
@@ -503,7 +618,7 @@ class ClickerApp:
             ttk.Label(stats, textvariable=self.stat_vars[key], style="MetricValue.TLabel").grid(row=1, column=i * 2, sticky="w", pady=(3, 0))
             stats.columnconfigure(i * 2, weight=1)
         progress_track = ttk.Frame(stats, height=4)
-        progress_track.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(6, 0))
+        progress_track.grid(row=2, column=0, columnspan=5, sticky="ew", pady=(8, 0))
         progress_track.pack_propagate(False)
         self.progress = ttk.Progressbar(progress_track, style="Horizontal.TProgressbar", mode="determinate", maximum=100)
         self.progress.pack(fill="both", expand=True)
@@ -517,13 +632,37 @@ class ClickerApp:
         toolbar.pack(fill="x", pady=(0, 14))
         controls = ttk.Frame(toolbar, style="CardInner.TFrame")
         controls.pack(fill="x")
-        self.record_button = ttk.Button(controls, text="●  开始录制", style="Primary.TButton", command=self.toggle_recording)
+        rec_box = ttk.Frame(controls, style="CardInner.TFrame")
+        rec_box.pack(side="left")
+        self.record_button = ttk.Button(rec_box, text="●  开始录制", style="Primary.TButton", command=self.toggle_recording)
         self.record_button.pack(side="left")
-        self.play_button = ttk.Button(controls, text="▶  回放动作", command=self.play_recording)
-        self.play_button.pack(side="left", padx=(10, 0))
-        self.record_stop_button = ttk.Button(controls, text="■  停止", style="Danger.TButton", command=self.stop_all)
-        self.record_stop_button.pack(side="left", padx=(10, 0))
-        ttk.Button(controls, text="清空记录", command=self.clear_recording).pack(side="left", padx=(10, 0))
+        self.record_hotkey_badge = bind_theme(tk.Label(rec_box, text=self.display_hotkey(self.hotkey_specs.get("record", "")),
+                                                       font=("Segoe UI", 8, "bold"), padx=5, pady=2, relief="solid", bd=1),
+                                              bg="keycap_bg", fg="keycap_text", highlightbackground="keycap_border")
+        self.record_hotkey_badge.pack(side="left", padx=(4, 10))
+        Tooltip(self.record_hotkey_badge, "开始/停止录制快捷键 (默认 F7)")
+
+        play_box = ttk.Frame(controls, style="CardInner.TFrame")
+        play_box.pack(side="left")
+        self.play_button = ttk.Button(play_box, text="▶  回放动作", command=self.play_recording)
+        self.play_button.pack(side="left")
+        self.play_hotkey_badge = bind_theme(tk.Label(play_box, text=self.display_hotkey(self.hotkey_specs.get("play", "")),
+                                                     font=("Segoe UI", 8, "bold"), padx=5, pady=2, relief="solid", bd=1),
+                                            bg="keycap_bg", fg="keycap_text", highlightbackground="keycap_border")
+        self.play_hotkey_badge.pack(side="left", padx=(4, 10))
+        Tooltip(self.play_hotkey_badge, "开始/停止回放快捷键 (默认 F10)")
+
+        stop_box = ttk.Frame(controls, style="CardInner.TFrame")
+        stop_box.pack(side="left")
+        self.record_stop_button = ttk.Button(stop_box, text="■  停止", style="Danger.TButton", command=self.stop_all)
+        self.record_stop_button.pack(side="left")
+        self.record_stop_hotkey_badge = bind_theme(tk.Label(stop_box, text=self.display_hotkey(self.hotkey_specs.get("stop", "")),
+                                                            font=("Segoe UI", 8, "bold"), padx=5, pady=2, relief="solid", bd=1),
+                                                   bg="danger_surface", fg="danger", highlightbackground="danger_border")
+        self.record_stop_hotkey_badge.pack(side="left", padx=(4, 10))
+        Tooltip(self.record_stop_hotkey_badge, "紧急停止快捷键 (默认 F8)")
+
+        ttk.Button(controls, text="清空记录", command=self.clear_recording).pack(side="left")
         options = ttk.Frame(toolbar, style="CardInner.TFrame")
         options.pack(fill="x", pady=(14, 0))
         self.record_include_moves_var = tk.BooleanVar(value=True)
@@ -2289,45 +2428,130 @@ class ClickerApp:
     def build_hotkey_page(self):
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["hotkeys"] = page
-        appearance = ttk.Frame(page, style="Card.TFrame", padding=(12, 10))
+
+        # Appearance & Theme Card
+        appearance = ttk.Frame(page, style="Card.TFrame", padding=(18, 14))
         appearance.pack(fill="x", pady=(0, 14))
-        ttk.Label(appearance, text="主题颜色", style="HeroTitle.TLabel").pack(side="left", padx=(0, 22))
-        self.theme_var = tk.StringVar(value=self.theme_name)
-        for name, label in (("dark", "深色"), ("light", "浅色")):
-            ttk.Radiobutton(appearance, text=label, value=name, variable=self.theme_var,
-                            command=self.change_theme).pack(side="left", padx=(0, 16))
+        theme_head = ttk.Frame(appearance, style="CardInner.TFrame")
+        theme_head.pack(fill="x")
+        ttk.Label(theme_head, text="🎨  界面外观与主题", style="CardHeader.TLabel").pack(side="left")
         self.theme_status_var = tk.StringVar(value="立即生效 · 自动保存")
-        ttk.Label(appearance, textvariable=self.theme_status_var, style="Hint.TLabel").pack(side="right")
-        intro = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
-        intro.pack(fill="x", pady=(0, 14))
-        ttk.Label(intro, text="任务快捷键", style="HeroTitle.TLabel").pack(anchor="w")
-        card = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
-        card.pack(fill="x", pady=(0, 14))
-        card.columnconfigure(1, weight=1)
+        ttk.Label(theme_head, textvariable=self.theme_status_var, style="Hint.TLabel").pack(side="right")
+
+        theme_controls = ttk.Frame(appearance, style="CardInner.TFrame")
+        theme_controls.pack(fill="x", pady=(12, 0))
+        self.theme_var = tk.StringVar(value=self.theme_name)
+        for name, label, icon in (("dark", "深色暗夜模式", "🌙"), ("light", "明亮浅色模式", "☀️")):
+            ttk.Radiobutton(theme_controls, text=f"{icon}  {label}", value=name, variable=self.theme_var,
+                            command=self.change_theme).pack(side="left", padx=(0, 24))
+
+        # Hotkeys Card
+        hotkey_card = ttk.Frame(page, style="Card.TFrame", padding=(18, 16))
+        hotkey_card.pack(fill="both", expand=True, pady=(0, 10))
+
+        hk_head = ttk.Frame(hotkey_card, style="CardInner.TFrame")
+        hk_head.pack(fill="x", pady=(0, 10))
+        hk_title_box = ttk.Frame(hk_head, style="CardInner.TFrame")
+        hk_title_box.pack(side="left")
+        ttk.Label(hk_title_box, text="⌨  全局快捷键设置", style="CardHeader.TLabel").pack(anchor="w")
+        ttk.Label(hk_title_box, text="全局有效 · 点击按键框直接录制新快捷键，支持单键或组合键 (Ctrl/Alt/Shift)",
+                  style="Hint.TLabel").pack(anchor="w", pady=(2, 0))
+
+        preset_box = ttk.Frame(hk_head, style="CardInner.TFrame")
+        preset_box.pack(side="right")
+        all_reset_btn = ttk.Button(preset_box, text="↺  恢复全部默认", style="Compact.TButton",
+                                   command=self.reset_all_hotkeys_to_default)
+        all_reset_btn.pack(side="right")
+        Tooltip(all_reset_btn, "一键将全部快捷键恢复为默认值 (F6 ~ F10)")
+
+        # Presets Toolbar
+        presets_bar = ttk.Frame(hotkey_card, style="CardInner.TFrame")
+        presets_bar.pack(fill="x", pady=(0, 12))
+        ttk.Label(presets_bar, text="快速方案预设:", style="Hint.TLabel").pack(side="left", padx=(0, 8))
+        for p_label, p_code, p_tip in (
+            ("常用 F区 (F6~F10)", "default", "F6连点 / F9暂停 / F7录制 / F10回放 / F8停止"),
+            ("单手组合 (Ctrl+1~5)", "ctrl", "Ctrl+1连点 / Ctrl+2暂停 / Ctrl+3录制 / Ctrl+4回放 / Ctrl+5停止"),
+            ("Alt组合 (Alt+F1~F5)", "alt_f", "Alt+F1连点 / Alt+F2暂停 / Alt+F3录制 / Alt+F4回放 / Alt+F5停止"),
+        ):
+            p_btn = ttk.Button(presets_bar, text=p_label, style="Compact.TButton",
+                               command=lambda c=p_code: self.apply_hotkey_preset(c))
+            p_btn.pack(side="left", padx=(0, 6))
+            Tooltip(p_btn, p_tip)
+
+        self.hotkey_apply_status = tk.StringVar(value="提示：点击按键框直接按键盘录制，Esc取消，Del/Backspace清空")
+        status_banner = bind_theme(tk.Frame(hotkey_card, padx=12, pady=6), bg="surface_hover")
+        status_banner.pack(fill="x", pady=(0, 12))
+        bind_theme(tk.Label(status_banner, textvariable=self.hotkey_apply_status, font=("Microsoft YaHei UI", 9)),
+                   bg="surface_hover", fg="text_secondary").pack(side="left")
+
+        # Hotkeys List Container
         self.hotkey_vars: dict[str, tk.StringVar] = {}
         self.hotkey_state_vars: dict[str, tk.StringVar] = {}
         self.hotkey_entries: dict[str, ttk.Entry] = {}
+
+        list_container = ttk.Frame(hotkey_card, style="CardInner.TFrame")
+        list_container.pack(fill="both", expand=True)
+
         hotkey_names = tuple(HOTKEY_DEFAULTS)
-        for row, name in enumerate(hotkey_names):
+        for name in hotkey_names:
             self.hotkey_vars[name] = tk.StringVar(value=self.display_hotkey(HOTKEY_DEFAULTS[name]))
-            self.hotkey_state_vars[name] = tk.StringVar(value="点击输入框后按键")
-            ttk.Label(card, text=HOTKEY_LABELS[name], style="CardText.TLabel").grid(row=row, column=0, sticky="w", pady=7)
-            entry = ttk.Entry(card, textvariable=self.hotkey_vars[name], width=14)
-            entry.grid(row=row, column=1, sticky="ew", padx=(28, 10), pady=7)
+            self.hotkey_state_vars[name] = tk.StringVar(value="已就绪")
+
+            row_frame = bind_theme(tk.Frame(list_container, padx=12, pady=8), bg="surface_hover")
+            row_frame.pack(fill="x", pady=(0, 6))
+
+            # Left: Icon + Title + Description
+            left_col = bind_theme(tk.Frame(row_frame), bg="surface_hover")
+            left_col.pack(side="left", fill="x", expand=True)
+
+            title_row = bind_theme(tk.Frame(left_col), bg="surface_hover")
+            title_row.pack(anchor="w")
+            bind_theme(tk.Label(title_row, text=HOTKEY_ICONS.get(name, "⚡"), font=("Segoe UI Emoji", 10)),
+                       bg="surface_hover", fg="accent").pack(side="left", padx=(0, 6))
+            bind_theme(tk.Label(title_row, text=HOTKEY_LABELS[name], font=("Microsoft YaHei UI", 9, "bold")),
+                       bg="surface_hover", fg="text").pack(side="left")
+
+            bind_theme(tk.Label(left_col, text=HOTKEY_DESCRIPTIONS.get(name, ""), font=("Microsoft YaHei UI", 8)),
+                       bg="surface_hover", fg="text_muted").pack(anchor="w", pady=(2, 0), padx=(22, 0))
+
+            # Right: Status + Keycap Entry + Rebind + Reset + Clear
+            right_col = bind_theme(tk.Frame(row_frame), bg="surface_hover")
+            right_col.pack(side="right")
+
+            bind_theme(tk.Label(right_col, textvariable=self.hotkey_state_vars[name],
+                                font=("Microsoft YaHei UI", 8), width=15, anchor="e"),
+                       bg="surface_hover", fg="text_secondary").pack(side="left", padx=(0, 8))
+
+            entry = ttk.Entry(right_col, textvariable=self.hotkey_vars[name], width=13, justify="center",
+                              style="Keycap.TEntry", cursor="hand2")
+            entry.pack(side="left", padx=(0, 8))
             entry.bind("<Button-1>", lambda event, key=name: self.arm_hotkey_capture(key))
             entry.bind("<KeyPress>", lambda event, key=name: self.capture_hotkey(event, key))
+            Tooltip(entry, "点击此处后直接按下键盘按键即可设置 (按Esc取消，Del清空)")
             self.hotkey_entries[name] = entry
-            ttk.Label(card, textvariable=self.hotkey_state_vars[name], style="Hint.TLabel", width=19).grid(row=row, column=2, sticky="e", pady=7)
-            clear = ttk.Button(card, image=self.ui_images["clear"], style="Icon.TButton", command=lambda key=name: self.clear_hotkey(key))
-            clear.grid(row=row, column=3, padx=(12, 0), pady=7)
-            Tooltip(clear, "清除快捷键")
-        separator_row = len(hotkey_names)
-        ttk.Separator(card).grid(row=separator_row, column=0, columnspan=4, sticky="ew", pady=(10, 14))
-        self.hotkey_apply_status = tk.StringVar(value="修改后点击应用，快捷键会立即生效")
-        action_row = separator_row + 1
-        ttk.Button(card, text="应用快捷键", style="Primary.TButton", command=self.apply_hotkeys).grid(row=action_row, column=0, sticky="w")
-        ttk.Button(card, text="保存配置", command=self.save_config).grid(row=action_row, column=1, sticky="w", padx=(12, 0))
-        ttk.Label(card, textvariable=self.hotkey_apply_status, style="Hint.TLabel", wraplength=230).grid(row=action_row, column=2, columnspan=2, sticky="e")
+
+            rebind_btn = ttk.Button(right_col, text="录制", style="Compact.TButton",
+                                    command=lambda key=name: self.arm_hotkey_capture(key))
+            rebind_btn.pack(side="left", padx=(0, 4))
+            Tooltip(rebind_btn, "点击开始录制新按键")
+
+            reset_icon = self.ui_images.get("reset", self.ui_images.get("clear"))
+            reset_btn = ttk.Button(right_col, image=reset_icon, style="Icon.TButton",
+                                   command=lambda key=name: self.reset_hotkey_to_default(key))
+            reset_btn.pack(side="left", padx=(0, 4))
+            Tooltip(reset_btn, f"恢复为默认快捷键 ({self.display_hotkey(HOTKEY_DEFAULTS[name])})")
+
+            clear_btn = ttk.Button(right_col, image=self.ui_images["clear"], style="Icon.TButton",
+                                   command=lambda key=name: self.clear_hotkey(key))
+            clear_btn.pack(side="left")
+            Tooltip(clear_btn, "清空此快捷键")
+
+        # Bottom Action Row
+        bottom_row = ttk.Frame(hotkey_card, style="CardInner.TFrame")
+        bottom_row.pack(fill="x", pady=(10, 0))
+        ttk.Button(bottom_row, text="应用快捷键", style="Primary.TButton", command=self.apply_hotkeys).pack(side="left")
+        ttk.Button(bottom_row, text="保存配置", command=self.save_config).pack(side="left", padx=(10, 0))
+        ttk.Label(bottom_row, text="录制完成后快捷键会自动生效并保存", style="Hint.TLabel").pack(side="left", padx=(16, 0))
 
     def build_footer(self):
         footer = bind_theme(tk.Frame(self.content, height=30), bg="surface_hover")
@@ -3408,6 +3632,27 @@ class ClickerApp:
     def refresh_hotkey_tip(self) -> None:
         if hasattr(self, "hotkey_tip_var"):
             self.hotkey_tip_var.set(self.hotkey_tip_text())
+        if hasattr(self, "sidebar_hotkey_badges"):
+            for key, badge in self.sidebar_hotkey_badges.items():
+                badge.configure(text=self.display_hotkey(self.hotkey_specs.get(key, "")))
+        for attr, key in (
+            ("start_hotkey_badge", "toggle"),
+            ("pause_hotkey_badge", "pause"),
+            ("stop_hotkey_badge", "stop"),
+            ("record_hotkey_badge", "record"),
+            ("play_hotkey_badge", "play"),
+            ("record_stop_hotkey_badge", "stop"),
+        ):
+            badge = getattr(self, attr, None)
+            if badge is not None:
+                text = self.display_hotkey(self.hotkey_specs.get(key, ""))
+                badge.configure(text=text if text != "未设置" else "无热键")
+
+    def refresh_hotkey_displays(self) -> None:
+        self.refresh_hotkey_tip()
+        for name in HOTKEY_DEFAULTS:
+            if name in getattr(self, "hotkey_vars", {}):
+                self.hotkey_vars[name].set(self.display_hotkey(self.hotkey_specs.get(name, "")))
 
     def arm_hotkey_capture(self, name: str):
         self.hotkey_ignore_until = time.monotonic() + 0.5
@@ -3425,15 +3670,67 @@ class ClickerApp:
         entry.configure(style="Capture.TEntry")
         entry.focus_set()
         entry.selection_range(0, tk.END)
-        self.hotkey_state_vars[name].set("等待按键…")
-        self.set_status("请按下要设置的快捷键", "warning")
+        self.hotkey_state_vars[name].set("🔴 等待按键…")
+        self.hotkey_apply_status.set(f"正在录制【{HOTKEY_LABELS.get(name, name)}】：请按任意按键（Esc 取消，Del/Backspace 清空）")
+        self.set_status("请按下要设置的快捷键组合", "warning")
 
     def clear_hotkey(self, name: str):
         self.hotkey_specs[name] = ""
         self.hotkey_vars[name].set("未设置")
-        self.hotkey_state_vars[name].set("已清除")
-        self.hotkey_apply_status.set("有快捷键未设置，应用后将保持空闲")
-        self.refresh_hotkey_tip()
+        self.hotkey_state_vars[name].set("已清空")
+        self.hotkey_apply_status.set(f"已清空【{HOTKEY_LABELS.get(name, name)}】快捷键")
+        self.apply_hotkeys()
+        self.refresh_hotkey_displays()
+
+    def reset_hotkey_to_default(self, name: str):
+        default_spec = HOTKEY_DEFAULTS.get(name, "")
+        for other, other_spec in self.hotkey_specs.items():
+            if other != name and other_spec == default_spec:
+                self.hotkey_specs[other] = ""
+                if other in self.hotkey_vars:
+                    self.hotkey_vars[other].set("未设置")
+                if other in self.hotkey_state_vars:
+                    self.hotkey_state_vars[other].set("因冲突已清空")
+        self.hotkey_specs[name] = default_spec
+        if name in self.hotkey_vars:
+            self.hotkey_vars[name].set(self.display_hotkey(default_spec))
+        if name in self.hotkey_state_vars:
+            self.hotkey_state_vars[name].set("已恢复默认")
+        self.hotkey_apply_status.set(f"【{HOTKEY_LABELS.get(name, name)}】已恢复默认按键 ({self.display_hotkey(default_spec)})")
+        self.apply_hotkeys()
+        self.refresh_hotkey_displays()
+
+    def reset_all_hotkeys_to_default(self):
+        for name in HOTKEY_DEFAULTS:
+            self.hotkey_specs[name] = HOTKEY_DEFAULTS[name]
+            if name in self.hotkey_vars:
+                self.hotkey_vars[name].set(self.display_hotkey(HOTKEY_DEFAULTS[name]))
+            if name in self.hotkey_state_vars:
+                self.hotkey_state_vars[name].set("出厂默认")
+        self.hotkey_apply_status.set("所有快捷键已恢复为出厂默认设置 (F6 ~ F10)")
+        self.apply_hotkeys()
+        self.refresh_hotkey_displays()
+        self.set_status("已恢复全部默认快捷键", "success")
+
+    def apply_hotkey_preset(self, preset_code: str):
+        presets = {
+            "default": {"toggle": "<f6>", "pause": "<f9>", "record": "<f7>", "play": "<f10>", "stop": "<f8>"},
+            "ctrl": {"toggle": "<ctrl>+1", "pause": "<ctrl>+2", "record": "<ctrl>+3", "play": "<ctrl>+4", "stop": "<ctrl>+5"},
+            "alt_f": {"toggle": "<alt>+<f1>", "pause": "<alt>+<f2>", "record": "<alt>+<f3>", "play": "<alt>+<f4>", "stop": "<alt>+<f5>"},
+        }
+        mapping = presets.get(preset_code)
+        if not mapping:
+            return
+        for name, spec in mapping.items():
+            self.hotkey_specs[name] = spec
+            if name in self.hotkey_vars:
+                self.hotkey_vars[name].set(self.display_hotkey(spec))
+            if name in self.hotkey_state_vars:
+                self.hotkey_state_vars[name].set("预设")
+        self.hotkey_apply_status.set(f"已应用快捷键预设方案")
+        self.apply_hotkeys()
+        self.refresh_hotkey_displays()
+        self.set_status("已切换快捷键预设方案", "success")
 
     def capture_hotkey(self, event, name: str):
         if self.hotkey_capture_target != name:
@@ -3441,15 +3738,22 @@ class ClickerApp:
         keysym = str(event.keysym)
         state = int(getattr(event, "state", 0))
         if keysym in {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Win_L", "Win_R"}:
-            self.hotkey_state_vars[name].set("继续按组合键…")
+            self.hotkey_state_vars[name].set("继续按主键…")
             return "break"
         if keysym in {"Escape", "Esc"} and not state & (0x0001 | 0x0004 | 0x0008 | 0x20000):
             spec = self.hotkey_capture_previous
             self.hotkey_specs[name] = spec
             self.hotkey_vars[name].set(self.display_hotkey(spec))
             self.hotkey_state_vars[name].set("已取消")
+            self.hotkey_apply_status.set("已取消按键修改，保留原设置")
             self.finish_hotkey_capture()
             return "break"
+        if keysym in {"BackSpace", "Delete"} and not state & (0x0001 | 0x0004 | 0x0008 | 0x20000):
+            self.clear_hotkey(name)
+            self.hotkey_state_vars[name].set("已清空")
+            self.finish_hotkey_capture()
+            return "break"
+
         parts = []
         if state & 0x0004:
             parts.append("<ctrl>")
@@ -3470,35 +3774,48 @@ class ClickerApp:
         special = key.startswith("f") and key[1:].isdigit() or key in {"enter", "esc", "space", "tab", "backspace", "delete", "page_up", "page_down", "up", "down", "left", "right", "home", "end"}
         token = f"<{key}>" if special else key
         spec = "+".join(parts + [token])
-        # Ctrl+V is reserved by the vision page for direct image paste.  A
-        # global pynput binding would otherwise fire at the same time as the
-        # Tk clipboard handler (and could start/stop another task while the
-        # user is only trying to paste a screenshot).  Reject the conflict at
-        # capture time and restore the previous shortcut so the listener can
-        # be restarted immediately after the capture finishes.
         if self._is_clipboard_paste_hotkey(spec):
             previous = self.hotkey_capture_previous
             self.hotkey_specs[name] = previous
             self.hotkey_vars[name].set(self.display_hotkey(previous))
-            self.hotkey_state_vars[name].set("Ctrl+V 已保留给图片粘贴")
+            self.hotkey_state_vars[name].set("Ctrl+V 已保留")
+            self.hotkey_apply_status.set("⚠️ Ctrl+V 已保留给图片粘贴，请使用其他按键")
             self.finish_hotkey_capture()
             return "break"
+
+        # Check duplicate conflict with other actions
+        conflict_other = None
+        for other, other_spec in self.hotkey_specs.items():
+            if other != name and other_spec and other_spec == spec:
+                conflict_other = other
+                break
+        if conflict_other:
+            previous = self.hotkey_capture_previous
+            self.hotkey_specs[name] = previous
+            self.hotkey_vars[name].set(self.display_hotkey(previous))
+            self.hotkey_state_vars[name].set("按键冲突")
+            self.hotkey_apply_status.set(f"⚠️ 该快捷键已分配给【{HOTKEY_LABELS.get(conflict_other, conflict_other)}】，请按其他按键")
+            self.finish_hotkey_capture()
+            return "break"
+
         self.hotkey_specs[name] = spec
         self.hotkey_vars[name].set(self.display_hotkey(spec))
-        self.hotkey_state_vars[name].set("已捕获")
-        self.refresh_hotkey_tip()
+        self.hotkey_state_vars[name].set("已生效")
         self.finish_hotkey_capture()
+        self.apply_hotkeys()
+        self.hotkey_apply_status.set(f"【{HOTKEY_LABELS[name]}】已设置为 {self.display_hotkey(spec)} (已生效并保存)")
+        self.set_status(f"快捷键已更新：{HOTKEY_LABELS[name]} -> {self.display_hotkey(spec)}", "success")
         return "break"
 
     def finish_hotkey_capture(self):
         name = self.hotkey_capture_target
         self.hotkey_capture_target = None
         if name and name in self.hotkey_entries:
-            self.hotkey_entries[name].configure(style="TEntry")
-        self.hotkey_apply_status.set("快捷键已更新，请点击应用")
+            self.hotkey_entries[name].configure(style="Keycap.TEntry")
         self.hotkey_ignore_until = time.monotonic() + 0.5
         if not self.closing:
             self.root.after(350, self.start_hotkeys)
+        self.refresh_hotkey_displays()
 
     def apply_hotkeys(self):
         specs = [self.normalize_hotkey_spec(self.hotkey_specs.get(name, "")) for name in HOTKEY_DEFAULTS]
@@ -3516,13 +3833,11 @@ class ClickerApp:
                 for spec in nonempty:
                     keyboard.HotKey.parse(spec)
             except Exception as exc:
-                # Keep the current listener and persisted settings intact
-                # until every shortcut is known to be parseable.
                 self.hotkey_apply_status.set(f"快捷键格式无效：{exc}")
                 self.set_status("快捷键格式错误", "danger")
                 return
         self.hotkey_specs = dict(zip(HOTKEY_DEFAULTS, specs))
-        self.refresh_hotkey_tip()
+        self.refresh_hotkey_displays()
         if self.start_hotkeys():
             self.save_config()
             self.hotkey_apply_status.set("已应用并保存")

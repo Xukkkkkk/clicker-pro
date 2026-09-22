@@ -79,3 +79,68 @@ def test_custom_or_cleared_binding_survives_save_and_profile_import(
 def test_profile_rejects_invalid_playback_shortcut(settings):
     with pytest.raises(ValueError):
         main.ClickerApp._validate_profile_settings(settings)
+
+
+def test_reset_individual_and_all_hotkeys_to_default(app):
+    app.hotkey_specs["toggle"] = "<ctrl>+1"
+    app.hotkey_specs["play"] = "<ctrl>+2"
+    app.apply_hotkeys()
+    assert app.hotkey_specs["toggle"] == "<ctrl>+1"
+
+    app.reset_hotkey_to_default("toggle")
+    assert app.hotkey_specs["toggle"] == "<f6>"
+    assert app.hotkey_vars["toggle"].get() == "F6"
+
+    app.reset_all_hotkeys_to_default()
+    assert app.hotkey_specs["toggle"] == "<f6>"
+    assert app.hotkey_specs["record"] == "<f7>"
+    assert app.hotkey_specs["stop"] == "<f8>"
+    assert app.hotkey_specs["pause"] == "<f9>"
+    assert app.hotkey_specs["play"] == "<f10>"
+
+
+def test_apply_hotkey_presets(app):
+    app.apply_hotkey_preset("ctrl")
+    assert app.hotkey_specs["toggle"] == "<ctrl>+1"
+    assert app.hotkey_specs["stop"] == "<ctrl>+5"
+    assert app.hotkey_vars["toggle"].get() == "Ctrl + 1"
+
+    app.apply_hotkey_preset("default")
+    assert app.hotkey_specs["toggle"] == "<f6>"
+    assert app.hotkey_specs["play"] == "<f10>"
+
+
+def test_capture_hotkey_cancel_clear_and_conflict(app):
+    app.arm_hotkey_capture("play")
+    assert app.hotkey_capture_target == "play"
+
+    # Escape cancels without changing
+    esc_event = Mock(keysym="Escape", state=0)
+    assert app.capture_hotkey(esc_event, "play") == "break"
+    assert app.hotkey_specs["play"] == "<f10>"
+    assert app.hotkey_state_vars["play"].get() == "已取消"
+
+    # Backspace/Delete clears hotkey
+    app.arm_hotkey_capture("play")
+    del_event = Mock(keysym="Delete", state=0)
+    assert app.capture_hotkey(del_event, "play") == "break"
+    assert app.hotkey_specs["play"] == ""
+    assert app.hotkey_vars["play"].get() == "未设置"
+
+    # Conflict detection: trying to assign F6 (already used by toggle)
+    app.arm_hotkey_capture("play")
+    f6_event = Mock(keysym="F6", state=0, char="")
+    assert app.capture_hotkey(f6_event, "play") == "break"
+    assert "冲突" in app.hotkey_state_vars["play"].get()
+
+
+def test_click_presets(app):
+    app._apply_click_preset("10", False)
+    assert app.interval_var.get() == "10"
+    assert not app.random_var.get()
+
+    app._apply_click_preset("100", True)
+    assert app.interval_var.get() == "100"
+    assert app.random_var.get()
+    assert app.random_percent_var.get() == "20"
+

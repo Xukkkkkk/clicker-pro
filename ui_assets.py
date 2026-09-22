@@ -14,6 +14,8 @@ SYMBOLS = {
     "click": "\ue8b0", "record": "\ue7c8", "vision": "\ue722",
     "hotkeys": "\ue765", "import": "\ue8b5", "export": "\ue74e",
     "clear": "\ue74d", "save": "\ue74e", "window": "\ue737",
+    "reset": "\ue72c", "settings": "\ue713", "keyboard": "\ue765",
+    "lightning": "\ue945", "check": "\ue73e", "moon": "\ue708", "sun": "\ue706",
 }
 
 

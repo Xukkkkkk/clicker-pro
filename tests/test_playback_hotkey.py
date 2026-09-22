@@ -94,7 +94,7 @@ def test_reset_individual_and_all_hotkeys_to_default(app):
     app.reset_all_hotkeys_to_default()
     assert app.hotkey_specs["toggle"] == "<f6>"
     assert app.hotkey_specs["record"] == "<f7>"
-    assert app.hotkey_specs["stop"] == "<f8>"
+    assert app.hotkey_specs["stop"] == "<esc>"
     assert app.hotkey_specs["pause"] == "<f9>"
     assert app.hotkey_specs["play"] == "<f10>"
 
@@ -107,16 +107,26 @@ def test_apply_hotkey_presets(app):
 
     app.apply_hotkey_preset("default")
     assert app.hotkey_specs["toggle"] == "<f6>"
+    assert app.hotkey_specs["stop"] == "<esc>"
     assert app.hotkey_specs["play"] == "<f10>"
 
+    app.apply_hotkey_preset("f_keys")
+    assert app.hotkey_specs["stop"] == "<f8>"
 
-def test_capture_hotkey_cancel_clear_and_conflict(app):
-    app.arm_hotkey_capture("play")
-    assert app.hotkey_capture_target == "play"
 
-    # Escape cancels without changing
+def test_capture_hotkey_esc_cancel_clear_and_conflict(app):
+    # Escape now records Esc (<esc>)
+    app.arm_hotkey_capture("stop")
+    assert app.hotkey_capture_target == "stop"
     esc_event = Mock(keysym="Escape", state=0)
-    assert app.capture_hotkey(esc_event, "play") == "break"
+    assert app.capture_hotkey(esc_event, "stop") == "break"
+    assert app.hotkey_specs["stop"] == "<esc>"
+    assert app.hotkey_vars["stop"].get() == "Esc"
+    assert app.hotkey_state_vars["stop"].get() == "已生效"
+
+    # Focus out or cancel restores previous
+    app.arm_hotkey_capture("play")
+    app.cancel_hotkey_capture("play")
     assert app.hotkey_specs["play"] == "<f10>"
     assert app.hotkey_state_vars["play"].get() == "已取消"
 
@@ -132,6 +142,24 @@ def test_capture_hotkey_cancel_clear_and_conflict(app):
     f6_event = Mock(keysym="F6", state=0, char="")
     assert app.capture_hotkey(f6_event, "play") == "break"
     assert "冲突" in app.hotkey_state_vars["play"].get()
+
+
+def test_esc_emergency_stops_active_tasks(app):
+    app.running = True
+    app._emergency_stop()
+    assert not app.running
+
+    app.playing = True
+    app._emergency_stop()
+    assert not app.playing
+
+    app.vision_running = True
+    app._emergency_stop()
+    assert not app.vision_running
+
+    app.running = True
+    app._on_root_escape()
+    assert not app.running
 
 
 def test_click_presets(app):

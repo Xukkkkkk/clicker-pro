@@ -85,21 +85,21 @@ LEGACY_RECORD_FILE = APP_DIR / "clicker_record.json"
 HOTKEY_DEFAULTS = {
     "toggle": "<f6>",
     "record": "<f7>",
-    "stop": "<f8>",
+    "stop": "<esc>",
     "pause": "<f9>",
     "play": "<f10>",
 }
 HOTKEY_LABELS = {
     "toggle": "开始 / 停止连点",
     "record": "开始 / 停止录制",
-    "stop": "停止全部任务",
+    "stop": "停止全部任务 / 连点",
     "pause": "暂停 / 继续连点",
     "play": "开始 / 停止回放",
 }
 HOTKEY_DESCRIPTIONS = {
     "toggle": "全局启动或停止自动点击任务",
     "record": "记录鼠标操作轨迹与按键动作",
-    "stop": "一键紧急停止全部运行中的自动化任务",
+    "stop": "一键紧急停止全部点击事件与运行中的任务 (Esc)",
     "pause": "临时暂停或继续连点，保持已执行计数",
     "play": "循环回放已录制的鼠标动作序列",
 }
@@ -261,6 +261,7 @@ class ClickerApp:
         self.root.bind("<Configure>", self._update_vision_window_rect, add="+")
         self.root.bind("<Map>", self._update_vision_window_rect, add="+")
         self.root.bind("<Unmap>", self._update_vision_window_rect, add="+")
+        self.root.bind_all("<Escape>", self._on_root_escape, add="+")
         self._update_vision_window_rect()
         self.load_config()
         self.load_recording()
@@ -439,11 +440,12 @@ class ClickerApp:
         stop_box.pack(side="left")
         self.header_stop_button = ttk.Button(stop_box, text="停止全部", style="Danger.TButton", command=self.stop_all)
         self.header_stop_button.pack(side="left")
+        Tooltip(self.header_stop_button, "紧急停止全部点击与自动化任务 (快捷键 Esc)")
         self.stop_hotkey_badge = bind_theme(tk.Label(stop_box, text=self.display_hotkey(self.hotkey_specs.get("stop", "")),
                                                      font=("Segoe UI", 8, "bold"), padx=5, pady=1, relief="solid", bd=1),
                                             bg="danger_surface", fg="danger", highlightbackground="danger_border")
         self.stop_hotkey_badge.pack(side="left", padx=(4, 0))
-        Tooltip(self.stop_hotkey_badge, "停止全部任务快捷键 (可在设置中修改)")
+        Tooltip(self.stop_hotkey_badge, "停止全部任务快捷键 (默认 Esc，可在设置中修改)")
 
         for name, title, command in (("import", "导入配置", self.import_profile), ("export", "导出配置", self.export_profile)):
             button = ttk.Button(right, image=self.ui_images[name], style="Icon.TButton", command=command)
@@ -471,6 +473,7 @@ class ClickerApp:
         start_box.pack(side="right", padx=(12, 0))
         self.start_button = ttk.Button(start_box, text="▶  开始连点", style="Primary.TButton", command=self.toggle_clicking)
         self.start_button.pack(side="left")
+        Tooltip(self.start_button, "开始/停止连点 (运行中可随时按 Esc 紧急停止全部点击)")
         self.start_hotkey_badge = bind_theme(tk.Label(start_box, text=self.display_hotkey(self.hotkey_specs.get("toggle", "")),
                                                       font=("Segoe UI", 9, "bold"), padx=6, pady=3,
                                                       relief="solid", bd=1),
@@ -660,7 +663,7 @@ class ClickerApp:
                                                             font=("Segoe UI", 8, "bold"), padx=5, pady=2, relief="solid", bd=1),
                                                    bg="danger_surface", fg="danger", highlightbackground="danger_border")
         self.record_stop_hotkey_badge.pack(side="left", padx=(4, 10))
-        Tooltip(self.record_stop_hotkey_badge, "紧急停止快捷键 (默认 F8)")
+        Tooltip(self.record_stop_hotkey_badge, "紧急停止快捷键 (默认 Esc)")
 
         ttk.Button(controls, text="清空记录", command=self.clear_recording).pack(side="left")
         options = ttk.Frame(toolbar, style="CardInner.TFrame")
@@ -2462,14 +2465,15 @@ class ClickerApp:
         all_reset_btn = ttk.Button(preset_box, text="↺  恢复全部默认", style="Compact.TButton",
                                    command=self.reset_all_hotkeys_to_default)
         all_reset_btn.pack(side="right")
-        Tooltip(all_reset_btn, "一键将全部快捷键恢复为默认值 (F6 ~ F10)")
+        Tooltip(all_reset_btn, "一键将全部快捷键恢复为默认值 (F6~F10, Esc 停止全部)")
 
         # Presets Toolbar
         presets_bar = ttk.Frame(hotkey_card, style="CardInner.TFrame")
         presets_bar.pack(fill="x", pady=(0, 12))
         ttk.Label(presets_bar, text="快速方案预设:", style="Hint.TLabel").pack(side="left", padx=(0, 8))
         for p_label, p_code, p_tip in (
-            ("常用 F区 (F6~F10)", "default", "F6连点 / F9暂停 / F7录制 / F10回放 / F8停止"),
+            ("常用推荐 (Esc 停止)", "default", "F6连点 / F9暂停 / F7录制 / F10回放 / Esc停止全部"),
+            ("经典全 F区 (F6~F10)", "f_keys", "F6连点 / F9暂停 / F7录制 / F10回放 / F8停止"),
             ("单手组合 (Ctrl+1~5)", "ctrl", "Ctrl+1连点 / Ctrl+2暂停 / Ctrl+3录制 / Ctrl+4回放 / Ctrl+5停止"),
             ("Alt组合 (Alt+F1~F5)", "alt_f", "Alt+F1连点 / Alt+F2暂停 / Alt+F3录制 / Alt+F4回放 / Alt+F5停止"),
         ):
@@ -2478,7 +2482,7 @@ class ClickerApp:
             p_btn.pack(side="left", padx=(0, 6))
             Tooltip(p_btn, p_tip)
 
-        self.hotkey_apply_status = tk.StringVar(value="提示：点击按键框直接按键盘录制，Esc取消，Del/Backspace清空")
+        self.hotkey_apply_status = tk.StringVar(value="提示：点击按键框直接按键盘录制 (支持直接按 Esc)，Del/Backspace 清空，点击外部取消")
         status_banner = bind_theme(tk.Frame(hotkey_card, padx=12, pady=6), bg="surface_hover")
         status_banner.pack(fill="x", pady=(0, 12))
         bind_theme(tk.Label(status_banner, textvariable=self.hotkey_apply_status, font=("Microsoft YaHei UI", 9)),
@@ -2527,7 +2531,8 @@ class ClickerApp:
             entry.pack(side="left", padx=(0, 8))
             entry.bind("<Button-1>", lambda event, key=name: self.arm_hotkey_capture(key))
             entry.bind("<KeyPress>", lambda event, key=name: self.capture_hotkey(event, key))
-            Tooltip(entry, "点击此处后直接按下键盘按键即可设置 (按Esc取消，Del清空)")
+            entry.bind("<FocusOut>", lambda event, key=name: self._on_hotkey_focus_out(key))
+            Tooltip(entry, "点击此处后直接按键盘按键即可设置 (支持直接按 Esc，Del/Backspace 清空，点击外部取消)")
             self.hotkey_entries[name] = entry
 
             rebind_btn = ttk.Button(right_col, text="录制", style="Compact.TButton",
@@ -3665,14 +3670,32 @@ class ClickerApp:
                 pass
             self.hotkey_listener = None
         self.hotkey_capture_target = name
-        self.hotkey_capture_previous = self.hotkey_specs.get(name, HOTKEY_DEFAULTS[name])
+        self.hotkey_capture_previous = self.hotkey_specs.get(name, HOTKEY_DEFAULTS.get(name, ""))
         entry = self.hotkey_entries[name]
         entry.configure(style="Capture.TEntry")
         entry.focus_set()
         entry.selection_range(0, tk.END)
         self.hotkey_state_vars[name].set("🔴 等待按键…")
-        self.hotkey_apply_status.set(f"正在录制【{HOTKEY_LABELS.get(name, name)}】：请按任意按键（Esc 取消，Del/Backspace 清空）")
+        self.hotkey_apply_status.set(f"正在录制【{HOTKEY_LABELS.get(name, name)}】：请按键盘按键（支持直接按 Esc，Del/Backspace 清空，点击外部取消）")
         self.set_status("请按下要设置的快捷键组合", "warning")
+
+    def cancel_hotkey_capture(self, name: Optional[str] = None):
+        target = name or self.hotkey_capture_target
+        if not target:
+            return
+        spec = self.hotkey_capture_previous
+        self.hotkey_specs[target] = spec
+        if target in getattr(self, "hotkey_vars", {}):
+            self.hotkey_vars[target].set(self.display_hotkey(spec))
+        if target in getattr(self, "hotkey_state_vars", {}):
+            self.hotkey_state_vars[target].set("已取消")
+        if hasattr(self, "hotkey_apply_status"):
+            self.hotkey_apply_status.set("已取消按键修改，保留原设置")
+        self.finish_hotkey_capture()
+
+    def _on_hotkey_focus_out(self, name: str):
+        if self.hotkey_capture_target == name:
+            self.cancel_hotkey_capture(name)
 
     def clear_hotkey(self, name: str):
         self.hotkey_specs[name] = ""
@@ -3707,14 +3730,15 @@ class ClickerApp:
                 self.hotkey_vars[name].set(self.display_hotkey(HOTKEY_DEFAULTS[name]))
             if name in self.hotkey_state_vars:
                 self.hotkey_state_vars[name].set("出厂默认")
-        self.hotkey_apply_status.set("所有快捷键已恢复为出厂默认设置 (F6 ~ F10)")
+        self.hotkey_apply_status.set("所有快捷键已恢复为出厂默认设置 (F6~F10, Esc 停止全部)")
         self.apply_hotkeys()
         self.refresh_hotkey_displays()
         self.set_status("已恢复全部默认快捷键", "success")
 
     def apply_hotkey_preset(self, preset_code: str):
         presets = {
-            "default": {"toggle": "<f6>", "pause": "<f9>", "record": "<f7>", "play": "<f10>", "stop": "<f8>"},
+            "default": {"toggle": "<f6>", "pause": "<f9>", "record": "<f7>", "play": "<f10>", "stop": "<esc>"},
+            "f_keys": {"toggle": "<f6>", "pause": "<f9>", "record": "<f7>", "play": "<f10>", "stop": "<f8>"},
             "ctrl": {"toggle": "<ctrl>+1", "pause": "<ctrl>+2", "record": "<ctrl>+3", "play": "<ctrl>+4", "stop": "<ctrl>+5"},
             "alt_f": {"toggle": "<alt>+<f1>", "pause": "<alt>+<f2>", "record": "<alt>+<f3>", "play": "<alt>+<f4>", "stop": "<alt>+<f5>"},
         }
@@ -3740,14 +3764,6 @@ class ClickerApp:
         if keysym in {"Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Win_L", "Win_R"}:
             self.hotkey_state_vars[name].set("继续按主键…")
             return "break"
-        if keysym in {"Escape", "Esc"} and not state & (0x0001 | 0x0004 | 0x0008 | 0x20000):
-            spec = self.hotkey_capture_previous
-            self.hotkey_specs[name] = spec
-            self.hotkey_vars[name].set(self.display_hotkey(spec))
-            self.hotkey_state_vars[name].set("已取消")
-            self.hotkey_apply_status.set("已取消按键修改，保留原设置")
-            self.finish_hotkey_capture()
-            return "break"
         if keysym in {"BackSpace", "Delete"} and not state & (0x0001 | 0x0004 | 0x0008 | 0x20000):
             self.clear_hotkey(name)
             self.hotkey_state_vars[name].set("已清空")
@@ -3762,7 +3778,9 @@ class ClickerApp:
         if state & 0x0001:
             parts.append("<shift>")
         printable = getattr(event, "char", "") or ""
-        if keysym.lower() == "space" or printable == " ":
+        if keysym in {"Escape", "Esc"}:
+            key = "esc"
+        elif keysym.lower() == "space" or printable == " ":
             key = "space"
         elif printable == "+":
             key = "+"
@@ -3810,7 +3828,7 @@ class ClickerApp:
     def finish_hotkey_capture(self):
         name = self.hotkey_capture_target
         self.hotkey_capture_target = None
-        if name and name in self.hotkey_entries:
+        if name and name in getattr(self, "hotkey_entries", {}):
             self.hotkey_entries[name].configure(style="Keycap.TEntry")
         self.hotkey_ignore_until = time.monotonic() + 0.5
         if not self.closing:
@@ -3881,6 +3899,8 @@ class ClickerApp:
                 keyboard.HotKey.parse(spec)
                 callback = callbacks[name]
                 mapping[spec] = lambda cb=callback: self._hotkey_callback(cb)
+            if "<esc>" not in mapping:
+                mapping["<esc>"] = lambda: self._hotkey_callback(self._emergency_stop)
             new_listener = keyboard.GlobalHotKeys(mapping)
             new_listener.start()
         except Exception as exc:
@@ -3923,6 +3943,18 @@ class ClickerApp:
         if self.closing or time.monotonic() < self.hotkey_ignore_until:
             return
         self.safe_after(callback)
+
+    def _emergency_stop(self):
+        """Global emergency stop: Esc stops all running click/automation tasks."""
+        if self.running or self.playing or self.vision_running or self.recording:
+            self.stop_all()
+
+    def _on_root_escape(self, event=None):
+        """Window-level Esc handler: stops running tasks unless capturing a hotkey."""
+        if getattr(self, "hotkey_capture_target", None) is not None:
+            return
+        if self.running or self.playing or self.vision_running or self.recording:
+            self.stop_all()
 
     # ------------------------------------------------------------- clicking
     def capture_position(self):

@@ -208,8 +208,60 @@ def configure_theme(root: tk.Misc, name: str = DEFAULT_THEME) -> ttk.Style:
         "Preset.TButton",
         background=COLORS["surface_hover"],
         foreground=COLORS["text"],
-        padding=(8, 4),
+        bordercolor=COLORS["border"],
+        lightcolor=COLORS["border"],
+        darkcolor=COLORS["border"],
+        borderwidth=1,
+        relief="flat",
+        padding=(9, 5),
         font=("Microsoft YaHei UI", 8),
+    )
+    style.map(
+        "Preset.TButton",
+        background=[("pressed", COLORS["surface_pressed"]),
+                    ("active", COLORS["surface_pressed"])],
+        foreground=[("active", COLORS["accent"])],
+        bordercolor=[("active", COLORS["border_focus"])],
+    )
+    style.configure(
+        "Compact.TButton",
+        background=COLORS["surface_hover"],
+        foreground=COLORS["text"],
+        bordercolor=COLORS["border"],
+        lightcolor=COLORS["border"],
+        darkcolor=COLORS["border"],
+        borderwidth=1,
+        relief="flat",
+        padding=(10, 5),
+        font=("Microsoft YaHei UI", 9),
+    )
+    style.map(
+        "Compact.TButton",
+        background=[("pressed", COLORS["surface_pressed"]),
+                    ("active", COLORS["surface_pressed"])],
+        foreground=[("disabled", COLORS["text_muted"]),
+                    ("active", COLORS["accent"])],
+        bordercolor=[("focus", COLORS["border_focus"]),
+                     ("active", COLORS["border_focus"])],
+    )
+    style.configure(
+        "Icon.TButton",
+        background=COLORS["surface_hover"],
+        foreground=COLORS["text"],
+        bordercolor=COLORS["border"],
+        lightcolor=COLORS["border"],
+        darkcolor=COLORS["border"],
+        borderwidth=1,
+        relief="flat",
+        padding=(8, 7),
+        font=("Microsoft YaHei UI", 9),
+    )
+    style.map(
+        "Icon.TButton",
+        background=[("pressed", COLORS["surface_pressed"]),
+                    ("active", COLORS["surface_pressed"])],
+        bordercolor=[("focus", COLORS["border_focus"]),
+                     ("active", COLORS["border_focus"])],
     )
     style.configure(
         "SectionTitle.TLabel",

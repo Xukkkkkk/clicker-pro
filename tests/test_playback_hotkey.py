@@ -172,3 +172,44 @@ def test_click_presets(app):
     assert app.random_var.get()
     assert app.random_percent_var.get() == "20"
 
+
+def test_direct_hotkey_replacement_via_entry_click_and_keypress(app):
+    # Click/Focus on entry directly arms replacement without any recording button
+    click_event = Mock()
+    assert app._on_hotkey_entry_click(click_event, "toggle") == "break"
+    assert app.hotkey_capture_target == "toggle"
+    assert "请按新按键" in app.hotkey_state_vars["toggle"].get()
+
+    # Pressing a new key directly replaces the hotkey
+    f1_event = Mock(keysym="F1", state=0, char="")
+    assert app.capture_hotkey(f1_event, "toggle") == "break"
+    assert app.hotkey_specs["toggle"] == "<f1>"
+    assert app.hotkey_vars["toggle"].get() == "F1"
+    assert app.hotkey_state_vars["toggle"].get() == "已生效"
+    assert app.hotkey_capture_target is None
+
+
+def test_modifier_combo_feedback_and_direct_replace(app):
+    app.arm_hotkey_capture("pause")
+    # Press Ctrl
+    ctrl_event = Mock(keysym="Control_L", state=0x0004)
+    assert app.capture_hotkey(ctrl_event, "pause") == "break"
+    assert "Ctrl" in app.hotkey_state_vars["pause"].get()
+
+    # Press P while Ctrl is held
+    p_event = Mock(keysym="p", state=0x0004, char="p")
+    assert app.capture_hotkey(p_event, "pause") == "break"
+    assert app.hotkey_specs["pause"] == "<ctrl>+p"
+    assert app.hotkey_vars["pause"].get() == "Ctrl + P"
+    assert app.hotkey_state_vars["pause"].get() == "已生效"
+
+
+def test_switching_hotkey_target_replaces_cleanly(app):
+    # Arm 'record', then immediately arm 'play' without finishing 'record'
+    app.arm_hotkey_capture("record")
+    assert app.hotkey_capture_target == "record"
+    app.arm_hotkey_capture("play")
+    assert app.hotkey_capture_target == "play"
+    assert app.hotkey_specs["record"] == "<f7>"  # 'record' restored
+
+

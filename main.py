@@ -217,6 +217,8 @@ class ClickerApp:
         self.hotkey_specs = dict(HOTKEY_DEFAULTS)
 
         self.vision_templates: list[dict[str, Any]] = []
+        self.vision_tasks: dict[str, dict[str, Any]] = {}
+        self.active_vision_task_name: str = "默认任务"
         self.vision_engine = None
         self.vision_engines: dict[int, Any] = {}
         self.vision_background_targets: list[dict[str, Any]] = []
@@ -722,27 +724,74 @@ class ClickerApp:
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["vision"] = page
 
-        intro = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
+        intro = ttk.Frame(page, style="Card.TFrame", padding=(14, 12))
         intro.pack(fill="x", pady=(0, 14))
-        intro_left = ttk.Frame(intro, style="CardInner.TFrame")
+
+        # Row 1: Title and Main Action Buttons
+        intro_row1 = ttk.Frame(intro, style="CardInner.TFrame")
+        intro_row1.pack(fill="x")
+        intro_left = ttk.Frame(intro_row1, style="CardInner.TFrame")
         intro_left.pack(side="left", fill="x", expand=True)
-        ttk.Label(intro_left, text="识别任务", style="HeroTitle.TLabel").pack(anchor="w")
-        self.vision_start_button = ttk.Button(intro, text="▶  开始识别", style="Primary.TButton", command=self.toggle_vision)
+        ttk.Label(intro_left, text="识别任务方案", style="HeroTitle.TLabel").pack(anchor="w")
+        ttk.Label(intro_left, text="多任务方案独立保存与一键切换 · 支持选择目标批量执行", style="Hint.TLabel").pack(anchor="w", pady=(2, 0))
+
+        self.vision_start_button = ttk.Button(intro_row1, text="▶  开始识别", style="Primary.TButton", command=self.toggle_vision)
         self.vision_start_button.pack(side="right")
-        self.vision_paste_button = ttk.Button(intro, text="粘贴图片", style="Compact.TButton", command=self.paste_vision_image)
+        Tooltip(self.vision_start_button, "执行当前所选任务方案中已启用的目标 (运行中按 Esc 紧急停止)")
+        self.vision_paste_button = ttk.Button(intro_row1, text="📋 粘贴图片", style="Compact.TButton", command=self.paste_vision_image)
         self.vision_paste_button.pack(side="right", padx=(0, 8))
+
+        # Row 2: Multi-Task Scheme Management Toolbar
+        task_bar = ttk.Frame(intro, style="CardInner.TFrame")
+        task_bar.pack(fill="x", pady=(10, 0))
+        ttk.Label(task_bar, text="当前任务方案:", style="Hint.TLabel").pack(side="left", padx=(0, 6))
+
+        self.vision_task_var = tk.StringVar(value=getattr(self, "active_vision_task_name", "默认任务"))
+        self.vision_task_combo = ttk.Combobox(
+            task_bar, textvariable=self.vision_task_var, state="readonly", width=14,
+        )
+        self.vision_task_combo.pack(side="left", padx=(0, 8))
+        self.vision_task_combo.bind("<<ComboboxSelected>>", self.select_vision_task)
+        Tooltip(self.vision_task_combo, "选择想要执行的识别任务方案")
+
+        add_task_btn = ttk.Button(task_bar, text="＋ 新建任务", style="Compact.TButton", command=self.add_vision_task)
+        add_task_btn.pack(side="left", padx=(0, 4))
+        Tooltip(add_task_btn, "新增一个独立的识别任务方案")
+
+        save_as_btn = ttk.Button(task_bar, text="💾 另存为新任务", style="Compact.TButton", command=self.save_vision_task_as)
+        save_as_btn.pack(side="left", padx=(0, 4))
+        Tooltip(save_as_btn, "将当前任务中的识别目标与配置另存为新任务")
+
+        save_cur_btn = ttk.Button(task_bar, text="保存当前", style="Compact.TButton", command=self.save_current_vision_task)
+        save_cur_btn.pack(side="left", padx=(0, 4))
+        Tooltip(save_cur_btn, "保存当前任务的目标设置与参数")
+
+        rename_task_btn = ttk.Button(task_bar, text="重命名", style="Compact.TButton", command=self.rename_vision_task)
+        rename_task_btn.pack(side="left", padx=(0, 4))
+        Tooltip(rename_task_btn, "重命名当前任务方案")
+
+        del_task_btn = ttk.Button(task_bar, text="删除任务", style="Compact.TButton", command=self.delete_vision_task)
+        del_task_btn.pack(side="left", padx=(0, 4))
+        Tooltip(del_task_btn, "删除当前选中的识别任务方案")
 
         toolbar = ttk.Frame(page, style="Card.TFrame", padding=(0, 8))
         toolbar.pack(fill="x", pady=(0, 14))
         ttk.Button(toolbar, text="＋  添加图片", style="Compact.TButton", command=self.add_vision_images).pack(side="left")
-        ttk.Button(toolbar, text="⌁  测试一次", style="Compact.TButton", command=self.scan_vision_once).pack(side="left", padx=(10, 0))
-        ttk.Button(toolbar, text="删除选中", style="Compact.TButton", command=self.remove_vision_template).pack(side="left", padx=(10, 0))
-        ttk.Button(toolbar, text="清空全部", style="Compact.TButton", command=self.clear_vision_templates).pack(side="left", padx=(10, 0))
-        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Button(toolbar, text="⌁  测试一次", style="Compact.TButton", command=self.scan_vision_once).pack(side="left", padx=(8, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        ttk.Button(toolbar, text="☑ 全部启用", style="Compact.TButton", command=self.enable_all_vision_templates).pack(side="left")
+        ttk.Button(toolbar, text="☐ 全部停用", style="Compact.TButton", command=self.disable_all_vision_templates).pack(side="left", padx=(4, 0))
+        ttk.Button(toolbar, text="⇄ 反选", style="Compact.TButton", command=self.invert_vision_templates).pack(side="left", padx=(4, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        ttk.Button(toolbar, text="删除选中", style="Compact.TButton", command=self.remove_vision_template).pack(side="left")
+        ttk.Button(toolbar, text="清空目标", style="Compact.TButton", command=self.clear_vision_templates).pack(side="left", padx=(4, 0))
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Label(toolbar, text="扫描间隔", style="Muted.TLabel").pack(side="left")
         self.vision_scan_var = tk.StringVar(value="0.20")
-        self.vision_scan_combo = ttk.Combobox(toolbar, textvariable=self.vision_scan_var, values=["0.05", "0.10", "0.20", "0.35", "0.50", "1.00"], state="readonly", width=7)
-        self.vision_scan_combo.pack(side="left", padx=(8, 4))
+        self.vision_scan_combo = ttk.Combobox(toolbar, textvariable=self.vision_scan_var, values=["0.05", "0.10", "0.20", "0.35", "0.50", "1.00"], state="readonly", width=6)
+        self.vision_scan_combo.pack(side="left", padx=(6, 2))
         ttk.Label(toolbar, text="秒", style="Muted.TLabel").pack(side="left")
         self.vision_global_status = tk.StringVar(value="待机")
         ttk.Label(toolbar, textvariable=self.vision_global_status, style="Count.TLabel").pack(side="right")
@@ -798,12 +847,8 @@ class ClickerApp:
         list_inner.pack(fill="both", expand=True)
         columns = ("name", "threshold", "cooldown", "button", "enabled")
         self.vision_tree = ttk.Treeview(list_inner, columns=columns, show="headings", selectmode="browse", height=6)
-        labels = {"name": "图片", "threshold": "阈值", "cooldown": "冷却", "button": "按键", "enabled": "状态"}
-        # Keep the list compact enough to leave a useful inline preview on a
-        # 1000 px window.  Cooldown and primary-button values remain in the
-        # row data and are shown in the editor after selecting a target; they
-        # do not need to consume a permanent column beside the preview.
-        widths = {"name": 145, "threshold": 56, "cooldown": 62, "button": 56, "enabled": 58}
+        labels = {"name": "目标图片", "threshold": "阈值", "cooldown": "冷却", "button": "按键", "enabled": "执行状态"}
+        widths = {"name": 130, "threshold": 56, "cooldown": 62, "button": 56, "enabled": 88}
         for col in columns:
             self.vision_tree.heading(col, text=labels[col])
             self.vision_tree.column(col, width=widths[col], anchor="w", stretch=col == "name")
@@ -813,12 +858,16 @@ class ClickerApp:
         vision_scroll.pack(side="right", fill="y")
         self.vision_tree.pack(side="left", fill="both", expand=True)
         self.vision_empty_label = tk.Label(
-            self.vision_tree, text="暂无识别目标", bg=COLORS["input"],
-            fg=COLORS["text_muted"], font=("Microsoft YaHei UI", 10),
+            self.vision_tree, text="暂无识别目标\n点击上方“添加图片”开始配置", bg=COLORS["input"],
+            fg=COLORS["text_muted"], font=("Microsoft YaHei UI", 10), justify="center",
         )
         bind_theme(self.vision_empty_label, bg="input", fg="text_muted")
         self.vision_empty_label.place(relx=0.5, rely=0.5, anchor="center")
         self.vision_tree.bind("<<TreeviewSelect>>", self.on_vision_select)
+        self.vision_tree.bind("<Double-1>", self.toggle_selected_vision_template)
+        self.vision_tree.bind("<space>", lambda _e: (self.toggle_selected_vision_template(), "break")[1])
+        Tooltip(self.vision_tree, "双击目标行或按空格键可快速切换【启用 / 停用】执行状态")
+
         # Keep row actions close to the target.  A right-click first selects
         # the row under the pointer, while Delete remains local to this
         # Treeview so it cannot remove a template while the user is editing a
@@ -840,6 +889,9 @@ class ClickerApp:
         bind_theme(self.vision_context_menu, background="surface_hover", foreground="text",
                    activebackground="selection", activeforeground="accent",
                    disabledforeground="text_muted")
+        self.vision_context_menu.add_command(
+            label="切换启用/停用 (双击/空格)", command=self.toggle_selected_vision_template
+        )
         self.vision_context_menu.add_command(
             label="查看大图", command=self._open_vision_preview
         )
@@ -980,7 +1032,8 @@ class ClickerApp:
         ttk.Label(form, text="每次最多命中", style="Muted.TLabel").grid(row=2, column=0, sticky="w", pady=5)
         ttk.Entry(form, textvariable=self.vision_max_matches_var, width=10, style="Vision.TEntry").grid(row=2, column=1, sticky="ew", padx=(18, 0), pady=4)
         ttk.Label(form, text="个（1=最佳一个）", style="Hint.TLabel").grid(row=2, column=2, sticky="w", padx=(8, 0))
-        ttk.Checkbutton(form, text="启用此目标", variable=self.vision_enabled_var).grid(row=3, column=1, sticky="w", padx=(18, 7), pady=(7, 0))
+        ttk.Checkbutton(form, text="启用此目标", variable=self.vision_enabled_var,
+                        command=self._on_vision_enabled_checkbox_toggle).grid(row=3, column=1, sticky="w", padx=(18, 7), pady=(7, 0))
         ttk.Checkbutton(form, text="灰度匹配（抗颜色变化）", variable=self.vision_grayscale_var).grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(7, 0))
 
         # Per-template action editor.  The compact controls cover the common
@@ -1110,8 +1163,341 @@ class ClickerApp:
                 f"{float(item.get('threshold', 0.85)):.2f}",
                 f"{float(item.get('cooldown', 0.60)):.2f}s",
                 item.get("button", "左键"),
-                "已启用" if item.get("enabled", True) else "已停用",
+                "✔ 已启用" if item.get("enabled", True) else "✕ 已停用",
             ))
+
+    def _prompt_task_name(self, title: str, prompt: str, initial_value: str = "") -> Optional[str]:
+        """Show a styled modal dialog to enter a task name."""
+        result = [None]
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        dlg.configure(bg=COLORS["window"])
+
+        dlg.geometry("380x150")
+        try:
+            rx = self.root.winfo_rootx() + (self.root.winfo_width() - 380) // 2
+            ry = self.root.winfo_rooty() + (self.root.winfo_height() - 150) // 2
+            dlg.geometry(f"+{max(0, rx)}+{max(0, ry)}")
+        except Exception:
+            pass
+
+        card = ttk.Frame(dlg, style="Card.TFrame", padding=(18, 14))
+        card.pack(fill="both", expand=True, padx=10, pady=10)
+
+        ttk.Label(card, text=prompt, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        var = tk.StringVar(value=initial_value)
+        entry = ttk.Entry(card, textvariable=var, width=32, style="Vision.TEntry")
+        entry.pack(fill="x", pady=(0, 12))
+        entry.focus_set()
+        entry.selection_range(0, tk.END)
+
+        btn_row = ttk.Frame(card, style="CardInner.TFrame")
+        btn_row.pack(fill="x")
+
+        def on_ok(_event=None):
+            val = var.get().strip()
+            if val:
+                result[0] = val
+                dlg.destroy()
+
+        def on_cancel(_event=None):
+            dlg.destroy()
+
+        ttk.Button(btn_row, text="取消", style="Compact.TButton", command=on_cancel).pack(side="right", padx=(8, 0))
+        ttk.Button(btn_row, text="确定", style="Primary.TButton", command=on_ok).pack(side="right")
+
+        dlg.bind("<Return>", on_ok)
+        dlg.bind("<Escape>", on_cancel)
+        dlg.grab_set()
+        self.root.wait_window(dlg)
+        return result[0]
+
+    def _sync_current_vision_task(self):
+        """Sync live templates and settings into the active vision task dictionary."""
+        name = getattr(self, "active_vision_task_name", "默认任务")
+        if not hasattr(self, "vision_tasks") or not isinstance(self.vision_tasks, dict):
+            self.vision_tasks = {}
+        self.vision_tasks[name] = {
+            "templates": [dict(item) for item in getattr(self, "vision_templates", [])],
+            "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+            "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
+            "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
+        }
+
+    def refresh_vision_task_ui(self):
+        """Refresh task combobox values and select the current active task."""
+        if not hasattr(self, "vision_task_combo"):
+            return
+        if not hasattr(self, "vision_tasks") or not self.vision_tasks:
+            self.vision_tasks = {
+                "默认任务": {
+                    "templates": [dict(item) for item in getattr(self, "vision_templates", [])],
+                    "scan_interval": "0.20",
+                    "immediate": False,
+                    "background": False,
+                }
+            }
+        names = list(self.vision_tasks.keys())
+        self.vision_task_combo["values"] = names
+        if getattr(self, "active_vision_task_name", "") not in self.vision_tasks:
+            self.active_vision_task_name = names[0]
+        self.vision_task_var.set(self.active_vision_task_name)
+
+    def select_vision_task(self, event=None):
+        """Switch active vision task when chosen from dropdown."""
+        selected_name = self.vision_task_var.get().strip()
+        if not selected_name or selected_name not in self.vision_tasks:
+            return
+        if selected_name == getattr(self, "active_vision_task_name", ""):
+            return
+
+        was_running = self.vision_running
+        if was_running:
+            self.stop_vision()
+
+        # Save previous task
+        self._sync_current_vision_task()
+
+        # Load new task
+        self.active_vision_task_name = selected_name
+        task_data = self.vision_tasks[selected_name]
+        self.vision_templates = [dict(item) for item in task_data.get("templates", [])]
+
+        if hasattr(self, "vision_scan_var") and "scan_interval" in task_data:
+            self.vision_scan_var.set(str(task_data["scan_interval"]))
+        if hasattr(self, "vision_immediate_var") and "immediate" in task_data:
+            self.vision_immediate_var.set(bool(task_data["immediate"]))
+            if hasattr(self, "vision_scan_combo"):
+                self.vision_scan_combo.configure(
+                    state="disabled" if self.vision_immediate_var.get() else "readonly"
+                )
+        if hasattr(self, "vision_background_var") and "background" in task_data:
+            self.vision_background_var.set(bool(task_data["background"]))
+            self.update_vision_background_state()
+
+        self.refresh_vision_tree()
+        if self.vision_templates:
+            first_id = self.vision_templates[0]["id"]
+            self.vision_tree.selection_set(first_id)
+            self.vision_tree.focus(first_id)
+            self.on_vision_select()
+        else:
+            self.vision_path_var.set("请从左侧选择一个目标")
+            self._clear_vision_preview("未选择图片")
+
+        count = len(self.vision_templates)
+        enabled_count = sum(1 for item in self.vision_templates if item.get("enabled", True))
+        self.vision_log_var.set(f"已切换到识别任务【{selected_name}】(共 {count} 个目标，{enabled_count} 个已启用)")
+        self.set_status(f"已切换识别任务：{selected_name}", "success")
+        self.save_config()
+
+        if was_running and enabled_count > 0:
+            self.start_vision()
+
+    def add_vision_task(self):
+        """Create and switch to a new vision task."""
+        default_name = f"任务 {len(self.vision_tasks) + 1}"
+        new_name = self._prompt_task_name("新建识别任务", "请输入新任务名称：", default_name)
+        if not new_name:
+            return
+        if new_name in self.vision_tasks:
+            messagebox.showwarning("任务已存在", f"任务【{new_name}】已存在，请使用其他名称。")
+            return
+
+        was_running = self.vision_running
+        if was_running:
+            self.stop_vision()
+
+        self._sync_current_vision_task()
+
+        copy_current = False
+        if self.vision_templates:
+            copy_current = messagebox.askyesno(
+                "继承目标",
+                f"是否将当前任务【{self.active_vision_task_name}】的图片目标复制到新任务？\n选择“是”复制目标，选择“否”创建空白任务。",
+                default="no",
+            )
+
+        templates = [dict(item) for item in self.vision_templates] if copy_current else []
+        self.vision_tasks[new_name] = {
+            "templates": templates,
+            "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+            "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
+            "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
+        }
+        self.active_vision_task_name = new_name
+        self.vision_templates = templates
+        self.refresh_vision_task_ui()
+        self.refresh_vision_tree()
+        if self.vision_templates:
+            first_id = self.vision_templates[0]["id"]
+            self.vision_tree.selection_set(first_id)
+            self.vision_tree.focus(first_id)
+            self.on_vision_select()
+        else:
+            self.vision_path_var.set("请从左侧选择一个目标")
+            self._clear_vision_preview("未选择图片")
+
+        self.vision_log_var.set(f"已新建任务【{new_name}】" + (f"（复制了 {len(templates)} 个目标）" if copy_current else "，请添加目标图片"))
+        self.set_status(f"已新建任务：{new_name}", "success")
+        self.save_config()
+
+    def save_vision_task_as(self):
+        """Save current templates and configuration as a new vision task."""
+        default_name = f"{self.active_vision_task_name}_备份"
+        new_name = self._prompt_task_name("另存为新任务", "请输入另存为的新任务名称：", default_name)
+        if not new_name:
+            return
+        if new_name in self.vision_tasks:
+            if not messagebox.askyesno("覆盖任务", f"任务【{new_name}】已存在，是否覆盖？"):
+                return
+
+        self._sync_current_vision_task()
+
+        self.vision_tasks[new_name] = {
+            "templates": [dict(item) for item in self.vision_templates],
+            "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+            "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
+            "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
+        }
+        self.active_vision_task_name = new_name
+        self.refresh_vision_task_ui()
+        self.vision_log_var.set(f"已将当前目标另存为任务【{new_name}】（包含 {len(self.vision_templates)} 个目标）")
+        self.set_status(f"已另存为新任务：{new_name}", "success")
+        self.save_config()
+
+    def save_current_vision_task(self):
+        """Explicitly save the active vision task to disk."""
+        if self._selected_vision_item():
+            self.save_vision_selection()
+        self._sync_current_vision_task()
+        self.save_config()
+        count = len(self.vision_templates)
+        enabled = sum(1 for item in self.vision_templates if item.get("enabled", True))
+        self.vision_log_var.set(f"任务【{self.active_vision_task_name}】保存成功（共 {count} 个目标，{enabled} 个启用）")
+        self.set_status(f"任务【{self.active_vision_task_name}】已保存", "success")
+
+    def rename_vision_task(self):
+        """Rename the active vision task."""
+        current_name = self.active_vision_task_name
+        new_name = self._prompt_task_name("重命名任务", "请输入新的任务名称：", current_name)
+        if not new_name or new_name == current_name:
+            return
+        if new_name in self.vision_tasks:
+            messagebox.showwarning("任务已存在", f"任务名称【{new_name}】已存在，请使用其他名称。")
+            return
+
+        self._sync_current_vision_task()
+        task_data = self.vision_tasks.pop(current_name)
+        self.vision_tasks[new_name] = task_data
+        self.active_vision_task_name = new_name
+        self.refresh_vision_task_ui()
+        self.vision_log_var.set(f"任务【{current_name}】已重命名为【{new_name}】")
+        self.set_status(f"任务已重命名：{new_name}", "success")
+        self.save_config()
+
+    def delete_vision_task(self):
+        """Delete the active vision task (keeps at least one task)."""
+        if len(self.vision_tasks) <= 1:
+            messagebox.showinfo("无法删除", "至少需要保留一个识别任务方案。如需清空内容可点击“清空目标”。")
+            return
+        current_name = self.active_vision_task_name
+        if not messagebox.askyesno("删除任务", f"确定要删除任务【{current_name}】及其包含的目标吗？此操作不可撤销。"):
+            return
+
+        was_running = self.vision_running
+        if was_running:
+            self.stop_vision()
+
+        del self.vision_tasks[current_name]
+        new_active = next(iter(self.vision_tasks.keys()))
+        self.active_vision_task_name = new_active
+        task_data = self.vision_tasks[new_active]
+        self.vision_templates = [dict(item) for item in task_data.get("templates", [])]
+        self.refresh_vision_task_ui()
+        self.refresh_vision_tree()
+        self.vision_log_var.set(f"已删除任务【{current_name}】，已切换到【{new_active}】")
+        self.set_status(f"已删除任务：{current_name}", "neutral")
+        self.save_config()
+
+    def toggle_selected_vision_template(self, event=None):
+        """Toggle enabled status of selected template row via double click or space."""
+        item = self._selected_vision_item()
+        if not item:
+            return
+        new_state = not item.get("enabled", True)
+        item["enabled"] = new_state
+        if hasattr(self, "vision_enabled_var"):
+            self.vision_enabled_var.set(new_state)
+        self.refresh_vision_tree()
+        self.vision_tree.selection_set(item["id"])
+        status_text = "✔ 已启用" if new_state else "✕ 已停用"
+        self.vision_log_var.set(f"目标【{item['name']}】状态已切换为：{status_text}")
+        self._sync_current_vision_task()
+        self.save_config()
+        if self.vision_running:
+            self.start_vision()
+
+    def enable_all_vision_templates(self):
+        """Enable all templates in the current task."""
+        if not self.vision_templates:
+            return
+        for item in self.vision_templates:
+            item["enabled"] = True
+        if self._selected_vision_item() and hasattr(self, "vision_enabled_var"):
+            self.vision_enabled_var.set(True)
+        self.refresh_vision_tree()
+        self.vision_log_var.set(f"已全部启用当前任务中的 {len(self.vision_templates)} 个识别目标")
+        self._sync_current_vision_task()
+        self.save_config()
+        if self.vision_running:
+            self.start_vision()
+
+    def disable_all_vision_templates(self):
+        """Disable all templates in the current task."""
+        if not self.vision_templates:
+            return
+        for item in self.vision_templates:
+            item["enabled"] = False
+        if self._selected_vision_item() and hasattr(self, "vision_enabled_var"):
+            self.vision_enabled_var.set(False)
+        self.refresh_vision_tree()
+        self.vision_log_var.set(f"已全部停用当前任务中的 {len(self.vision_templates)} 个识别目标")
+        self._sync_current_vision_task()
+        self.save_config()
+        if self.vision_running:
+            self.stop_vision()
+
+    def invert_vision_templates(self):
+        """Invert enabled status for all templates in the current task."""
+        if not self.vision_templates:
+            return
+        for item in self.vision_templates:
+            item["enabled"] = not item.get("enabled", True)
+        cur = self._selected_vision_item()
+        if cur and hasattr(self, "vision_enabled_var"):
+            self.vision_enabled_var.set(cur.get("enabled", True))
+        self.refresh_vision_tree()
+        enabled_count = sum(1 for item in self.vision_templates if item.get("enabled", True))
+        self.vision_log_var.set(f"已反选目标启用状态 (当前 {enabled_count}/{len(self.vision_templates)} 个已启用)")
+        self._sync_current_vision_task()
+        self.save_config()
+        if self.vision_running:
+            self.start_vision()
+
+    def _on_vision_enabled_checkbox_toggle(self):
+        """Handle immediate enable checkbox toggling from editor."""
+        item = self._selected_vision_item()
+        if item:
+            item["enabled"] = bool(self.vision_enabled_var.get())
+            self.refresh_vision_tree()
+            self.vision_tree.selection_set(item["id"])
+            self._sync_current_vision_task()
+            self.save_config()
+            if self.vision_running:
+                self.start_vision()
 
     @staticmethod
     def _is_image_path(path: Any) -> bool:
@@ -2715,54 +3101,174 @@ class ClickerApp:
         self.update_vision_background_state()
         if invalid_hotkeys:
             self.hotkey_apply_status.set("已回退无效快捷键为默认值")
+        # Handle vision tasks and vision templates
         # A profile import represents a complete snapshot and should clear
         # any existing templates when the profile intentionally contains none.
         # Startup loading keeps the legacy behaviour (missing key means leave
         # the in-memory list alone) for compatibility with old config files.
-        vision_data = data.get("vision_templates", [] if replace_templates else None)
+        has_tasks = "vision_tasks" in data and isinstance(data["vision_tasks"], dict)
+        has_templates = "vision_templates" in data and isinstance(data["vision_templates"], list)
         skipped_templates = 0
-        if isinstance(vision_data, list):
-            self.vision_templates = []
-            for raw in vision_data:
-                if not isinstance(raw, dict) or not raw.get("path"):
-                    skipped_templates += 1
+
+        if has_tasks:
+            parsed_tasks: dict[str, dict[str, Any]] = {}
+            for t_name, t_val in data["vision_tasks"].items():
+                if not isinstance(t_name, str) or not isinstance(t_val, dict):
                     continue
-                raw_path = Path(str(raw["path"])).expanduser()
-                if not raw_path.is_absolute() and profile_dir is not None:
-                    raw_path = profile_dir / raw_path
-                path = os.path.abspath(str(raw_path))
-                if not Path(path).is_file():
-                    skipped_templates += 1
+                clean_name = t_name.strip()
+                if not clean_name:
                     continue
-                self.vision_template_counter += 1
-                try:
-                    threshold = float(raw.get("threshold", 0.85))
-                    cooldown = float(raw.get("cooldown", 0.60))
-                except (TypeError, ValueError):
-                    threshold, cooldown = 0.85, 0.60
-                self.vision_templates.append({
-                    "id": f"vision-{self.vision_template_counter}", "path": path,
-                    "name": str(raw.get("name", Path(path).name)),
-                    "threshold": min(0.99, max(0.5, threshold)) if math.isfinite(threshold) else 0.85,
-                    "cooldown": max(0.0, cooldown) if math.isfinite(cooldown) else 0.60,
-                    "max_matches": max(1, min(50, int(raw.get("max_matches", 1) or 1))) if str(raw.get("max_matches", 1)).lstrip("-").isdigit() else 1,
-                    "grayscale": bool(raw.get("grayscale", False)),
-                    "button": self._vision_action_button(raw.get("button"), "左键"),
-                    "actions": raw.get("actions") if isinstance(raw.get("actions"), list) else None,
-                    "click_count": max(1, int(raw.get("click_count", 1) or 1)) if str(raw.get("click_count", 1)).lstrip("-").isdigit() else 1,
-                    "click_interval": max(0.0, float(raw.get("click_interval", 0.08) or 0.08)) if _finite_number(raw.get("click_interval", 0.08)) else 0.08,
-                    "hold_duration": max(0.0, float(raw.get("hold_duration", 0.0) or 0.0)) if _finite_number(raw.get("hold_duration", 0.0)) else 0.0,
-                    "enabled": bool(raw.get("enabled", True)),
-                    "source": raw.get("source", "file") if raw.get("source", "file") in {"file", "clipboard"} else "file",
-                })
+                raw_temps = t_val.get("templates", [])
+                t_templates, t_skipped = self._parse_raw_vision_templates(raw_temps, profile_dir)
+                skipped_templates += t_skipped
+                parsed_tasks[clean_name] = {
+                    "templates": t_templates,
+                    "scan_interval": str(t_val.get("scan_interval", data.get("vision_scan_interval", "0.20"))),
+                    "immediate": bool(t_val.get("immediate", data.get("vision_immediate", False))),
+                    "background": bool(t_val.get("background", data.get("vision_background", False))),
+                }
+            if parsed_tasks:
+                self.vision_tasks = parsed_tasks
+                active = str(data.get("vision_active_task", "")).strip()
+                if active in self.vision_tasks:
+                    self.active_vision_task_name = active
+                else:
+                    self.active_vision_task_name = next(iter(self.vision_tasks.keys()))
+                active_task_data = self.vision_tasks[self.active_vision_task_name]
+                self.vision_templates = [dict(item) for item in active_task_data.get("templates", [])]
+                if hasattr(self, "vision_scan_var") and "scan_interval" in active_task_data:
+                    self.vision_scan_var.set(str(active_task_data["scan_interval"]))
+                if hasattr(self, "vision_immediate_var") and "immediate" in active_task_data:
+                    self.vision_immediate_var.set(bool(active_task_data["immediate"]))
+                    if hasattr(self, "vision_scan_combo"):
+                        self.vision_scan_combo.configure(
+                            state="disabled" if self.vision_immediate_var.get() else "readonly"
+                        )
+                if hasattr(self, "vision_background_var") and "background" in active_task_data:
+                    self.vision_background_var.set(bool(active_task_data["background"]))
+                    self.update_vision_background_state()
+            elif replace_templates:
+                self.vision_tasks = {
+                    "默认任务": {
+                        "templates": [],
+                        "scan_interval": "0.20",
+                        "immediate": False,
+                        "background": False,
+                    }
+                }
+                self.active_vision_task_name = "默认任务"
+                self.vision_templates = []
+            self.refresh_vision_task_ui()
             self.refresh_vision_tree()
+        elif has_templates:
+            parsed_temps, skipped = self._parse_raw_vision_templates(data["vision_templates"], profile_dir)
+            skipped_templates += skipped
+            self.vision_templates = parsed_temps
+            self.active_vision_task_name = "默认任务"
+            self.vision_tasks = {
+                "默认任务": {
+                    "templates": [dict(item) for item in self.vision_templates],
+                    "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+                    "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
+                    "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
+                }
+            }
+            self.refresh_vision_task_ui()
+            self.refresh_vision_tree()
+        elif replace_templates:
+            self.vision_templates = []
+            self.active_vision_task_name = "默认任务"
+            self.vision_tasks = {
+                "默认任务": {
+                    "templates": [],
+                    "scan_interval": "0.20",
+                    "immediate": False,
+                    "background": False,
+                }
+            }
+            self.refresh_vision_task_ui()
+            self.refresh_vision_tree()
+        else:
+            self.refresh_vision_task_ui()
+
         return {
             "vision_loaded": len(self.vision_templates),
             "vision_skipped": skipped_templates,
         }
 
+    def _parse_raw_vision_templates(
+        self, raw_list: Any, profile_dir: Optional[Path] = None
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Parse raw template list from config/profile into validated item dictionaries."""
+        templates: list[dict[str, Any]] = []
+        skipped = 0
+        if not isinstance(raw_list, list):
+            return templates, skipped
+        for raw in raw_list:
+            if not isinstance(raw, dict) or not raw.get("path"):
+                skipped += 1
+                continue
+            raw_path = Path(str(raw["path"])).expanduser()
+            if not raw_path.is_absolute() and profile_dir is not None:
+                raw_path = profile_dir / raw_path
+            path = os.path.abspath(str(raw_path))
+            if not Path(path).is_file():
+                skipped += 1
+                continue
+            self.vision_template_counter += 1
+            try:
+                threshold = float(raw.get("threshold", 0.85))
+                cooldown = float(raw.get("cooldown", 0.60))
+            except (TypeError, ValueError):
+                threshold, cooldown = 0.85, 0.60
+            templates.append({
+                "id": f"vision-{self.vision_template_counter}",
+                "path": path,
+                "name": str(raw.get("name", Path(path).name)),
+                "threshold": min(0.99, max(0.5, threshold)) if math.isfinite(threshold) else 0.85,
+                "cooldown": max(0.0, cooldown) if math.isfinite(cooldown) else 0.60,
+                "max_matches": max(1, min(50, int(raw.get("max_matches", 1) or 1))) if str(raw.get("max_matches", 1)).lstrip("-").isdigit() else 1,
+                "grayscale": bool(raw.get("grayscale", False)),
+                "button": self._vision_action_button(raw.get("button"), "左键"),
+                "actions": raw.get("actions") if isinstance(raw.get("actions"), list) else None,
+                "click_count": max(1, int(raw.get("click_count", 1) or 1)) if str(raw.get("click_count", 1)).lstrip("-").isdigit() else 1,
+                "click_interval": max(0.0, float(raw.get("click_interval", 0.08) or 0.08)) if _finite_number(raw.get("click_interval", 0.08)) else 0.08,
+                "hold_duration": max(0.0, float(raw.get("hold_duration", 0.0) or 0.0)) if _finite_number(raw.get("hold_duration", 0.0)) else 0.0,
+                "enabled": bool(raw.get("enabled", True)),
+                "source": raw.get("source", "file") if raw.get("source", "file") in {"file", "clipboard"} else "file",
+            })
+        return templates, skipped
+
+    def _collect_vision_tasks(self) -> dict[str, Any]:
+        """Collect all vision tasks into a serialisable dictionary."""
+        self._sync_current_vision_task()
+        result: dict[str, Any] = {}
+        for name, task_data in getattr(self, "vision_tasks", {}).items():
+            if not isinstance(name, str) or not isinstance(task_data, dict):
+                continue
+            templates = [
+                self._serialise_vision_item(item)
+                for item in task_data.get("templates", [])
+                if isinstance(item, dict)
+            ]
+            result[name] = {
+                "templates": templates,
+                "scan_interval": str(task_data.get("scan_interval", "0.20")),
+                "immediate": bool(task_data.get("immediate", False)),
+                "background": bool(task_data.get("background", False)),
+            }
+        if not result:
+            result["默认任务"] = {
+                "templates": [self._serialise_vision_item(item) for item in self.vision_templates],
+                "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+                "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
+                "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
+            }
+        return result
+
     def _collect_config(self) -> dict[str, Any]:
         """Return one canonical settings snapshot for save/export/close."""
+        self._sync_current_vision_task()
         return {
             "schema_version": 4,
             "theme": self.theme_name,
@@ -2782,6 +3288,8 @@ class ClickerApp:
             "vision_scan_interval": self.vision_scan_var.get(),
             "vision_immediate": self.vision_immediate_var.get(),
             "vision_background": self.vision_background_var.get(),
+            "vision_active_task": getattr(self, "active_vision_task_name", "默认任务"),
+            "vision_tasks": self._collect_vision_tasks(),
             "vision_templates": [self._serialise_vision_item(item) for item in self.vision_templates],
             "toggle_hotkey": self.hotkey_specs.get("toggle", HOTKEY_DEFAULTS["toggle"]),
             "record_hotkey": self.hotkey_specs.get("record", HOTKEY_DEFAULTS["record"]),
@@ -2951,6 +3459,18 @@ class ClickerApp:
             seen_hotkeys[normalized] = name
         if "vision_templates" in data and not isinstance(data["vision_templates"], list):
             raise ValueError("配置项 vision_templates 必须是数组")
+        if "vision_tasks" in data:
+            if not isinstance(data["vision_tasks"], dict):
+                raise ValueError("配置项 vision_tasks 必须是字典")
+            for task_name, task_dict in data["vision_tasks"].items():
+                if not isinstance(task_name, str) or not task_name.strip():
+                    raise ValueError("任务名称必须是非空字符串")
+                if not isinstance(task_dict, dict):
+                    raise ValueError(f"任务 {task_name} 必须是对象")
+                if "templates" in task_dict and not isinstance(task_dict["templates"], list):
+                    raise ValueError(f"任务 {task_name} 的 templates 必须是数组")
+        if "vision_active_task" in data and not isinstance(data["vision_active_task"], str):
+            raise ValueError("配置项 vision_active_task 必须是字符串")
 
     @staticmethod
     def _profile_safe_asset_name(original_name: str, index: int,
@@ -2992,50 +3512,70 @@ class ClickerApp:
             dict(item) for item in settings.get("vision_templates", [])
             if isinstance(item, dict)
         ]
+        if "vision_tasks" in settings and isinstance(settings["vision_tasks"], dict):
+            settings["vision_tasks"] = {
+                t_name: {
+                    **t_data,
+                    "templates": [
+                        dict(it) for it in t_data.get("templates", [])
+                        if isinstance(it, dict)
+                    ]
+                }
+                for t_name, t_data in settings["vision_tasks"].items()
+                if isinstance(t_data, dict)
+            }
         assets: dict[str, Path] = {}
         source_to_arc: dict[str, str] = {}
         used_names: set[str] = set()
         warnings: list[str] = []
         total_bytes = 0
 
-        for index, item in enumerate(settings["vision_templates"], start=1):
-            raw_path = item.get("path")
-            try:
-                source = Path(str(raw_path or "")).expanduser()
-                # Older hand-written profiles sometimes used a path relative
-                # to the application directory.  Resolve that form for the
-                # copy operation while leaving an unresolvable value intact.
-                if not source.is_absolute() and not source.is_file():
-                    app_relative = APP_DIR / source
-                    if app_relative.is_file():
-                        source = app_relative
-                source = source.resolve(strict=True)
-                size = int(source.stat().st_size)
-            except (OSError, RuntimeError, TypeError, ValueError):
-                warnings.append("有模板文件不存在或无法读取")
-                continue
-            if source.suffix.lower() not in PROFILE_IMAGE_SUFFIXES:
-                warnings.append("有模板文件格式不支持打包")
-                continue
-            if size > PROFILE_MAX_SINGLE_ASSET_BYTES:
-                warnings.append("有模板文件超过单文件大小限制")
-                continue
-            source_key = os.path.normcase(str(source))
-            arcname = source_to_arc.get(source_key)
-            if arcname is None:
-                if len(assets) >= PROFILE_MAX_ASSETS:
-                    warnings.append("模板数量超过档案上限")
+        def process_template_list(items: list[dict[str, Any]]):
+            nonlocal total_bytes
+            for item in items:
+                raw_path = item.get("path")
+                try:
+                    source = Path(str(raw_path or "")).expanduser()
+                    # Older hand-written profiles sometimes used a path relative
+                    # to the application directory.  Resolve that form for the
+                    # copy operation while leaving an unresolvable value intact.
+                    if not source.is_absolute() and not source.is_file():
+                        app_relative = APP_DIR / source
+                        if app_relative.is_file():
+                            source = app_relative
+                    source = source.resolve(strict=True)
+                    size = int(source.stat().st_size)
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    warnings.append("有模板文件不存在或无法读取")
                     continue
-                if total_bytes + size > PROFILE_MAX_ASSET_BYTES:
-                    warnings.append("模板总大小超过档案上限")
+                if source.suffix.lower() not in PROFILE_IMAGE_SUFFIXES:
+                    warnings.append("有模板文件格式不支持打包")
                     continue
-                arcname = "assets/" + self._profile_safe_asset_name(
-                    source.name, index, used_names
-                )
-                source_to_arc[source_key] = arcname
-                assets[arcname] = source
-                total_bytes += size
-            item["path"] = arcname
+                if size > PROFILE_MAX_SINGLE_ASSET_BYTES:
+                    warnings.append("有模板文件超过单文件大小限制")
+                    continue
+                source_key = os.path.normcase(str(source))
+                arcname = source_to_arc.get(source_key)
+                if arcname is None:
+                    if len(assets) >= PROFILE_MAX_ASSETS:
+                        warnings.append("模板数量超过档案上限")
+                        continue
+                    if total_bytes + size > PROFILE_MAX_ASSET_BYTES:
+                        warnings.append("模板总大小超过档案上限")
+                        continue
+                    arcname = "assets/" + self._profile_safe_asset_name(
+                        source.name, len(assets) + 1, used_names
+                    )
+                    source_to_arc[source_key] = arcname
+                    assets[arcname] = source
+                    total_bytes += size
+                item["path"] = arcname
+
+        process_template_list(settings["vision_templates"])
+        if "vision_tasks" in settings and isinstance(settings["vision_tasks"], dict):
+            for t_data in settings["vision_tasks"].values():
+                if isinstance(t_data, dict) and "templates" in t_data:
+                    process_template_list(t_data["templates"])
 
         with self.event_lock:
             recording = list(self.events)

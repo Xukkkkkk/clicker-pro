@@ -1,4 +1,5 @@
 """Regression coverage for scaled captures and recognition lifecycle."""
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -129,3 +130,108 @@ def test_test_scan_stops_active_clicking_and_remains_read_only(app, monkeypatch,
     app.show_vision_scan_result([], generation=app.vision_generation-1)
     assert not app._vision_test_running
     assert not app._vision_preview_hidden_for_scan
+
+
+class RecordingCapturer:
+    """Stand-in for ScreenCapturer that serves crops of a fake desktop."""
+
+    def __init__(self, desktop, origin=(0, 0)):
+        self.desktop = desktop
+        self.origin = origin
+        self.regions = []
+
+    def capture(self, region=None):
+        self.regions.append(region)
+        origin_x, origin_y = self.origin
+        if region is None:
+            return ScreenFrame(self.desktop.copy(), origin_x, origin_y, time.time())
+        left, top, width, height = region
+        x0, y0 = left - origin_x, top - origin_y
+        return ScreenFrame(self.desktop[y0:y0 + height, x0:x0 + width].copy(),
+                           left, top, time.time())
+
+
+def desktop_with(template, x, y, size=(1080, 1920)):
+    frame = np.full((*size, 3), 40, dtype=np.uint8)
+    frame[y:y + template.shape[0], x:x + template.shape[1]] = template
+    return frame
+
+
+def tracking_engine(capturer, **kwargs):
+    engine = VisionEngine([TemplateSpec(image=button_image(), threshold=.95, **kwargs)])
+    engine.capturer = capturer
+    return engine
+
+
+def test_known_target_is_captured_from_a_crop_instead_of_the_whole_desktop():
+    template = button_image()
+    capturer = RecordingCapturer(desktop_with(template, 900, 600), origin=(-1920, 0))
+    engine = tracking_engine(capturer)
+
+    assert engine.scan_once(trigger=False)[0].rect == (-1020, 600, 128, 48)
+    second = engine.scan_once(trigger=False)
+
+    # Same absolute hit, but the second grab only asked for a small rectangle
+    # around the known target instead of the full virtual desktop.
+    assert second[0].rect == (-1020, 600, 128, 48)
+    assert capturer.regions[0] is None
+    left, top, width, height = capturer.regions[1]
+    assert width < 1920 and height < 1080
+    assert left <= -1020 and top <= 600
+    assert left + width >= -1020 + 128 and top + height >= 600 + 48
+
+
+def test_target_leaving_the_crop_is_found_again_on_the_next_scan():
+    template = button_image()
+    capturer = RecordingCapturer(desktop_with(template, 900, 600))
+    engine = tracking_engine(capturer)
+    assert engine.scan_once(trigger=False)[0].rect == (900, 600, 128, 48)
+
+    capturer.desktop = desktop_with(template, 120, 90)
+    # The cropped frame no longer contains the target, so this scan reports
+    # nothing and drops the cached location...
+    assert engine.scan_once(trigger=False) == []
+    assert capturer.regions[1] is not None
+
+    # ...and the very next scan is a full frame again, which finds the target.
+    matches = engine.scan_once(trigger=False)
+
+    assert capturer.regions[2] is None
+    assert engine.last_error is None
+    assert len(matches) == 1
+    assert matches[0].rect == (120, 90, 128, 48)
+
+
+def test_full_frames_resume_after_the_refresh_interval():
+    template = button_image()
+    capturer = RecordingCapturer(desktop_with(template, 900, 600))
+    engine = tracking_engine(capturer)
+    engine.region_refresh = 0
+    engine.scan_once(trigger=False)
+
+    assert engine.scan_once(trigger=False)[0].rect == (900, 600, 128, 48)
+    assert capturer.regions == [None, None]
+
+
+def test_multiple_occurrence_targets_always_scan_the_whole_frame():
+    template = button_image()
+    capturer = RecordingCapturer(desktop_with(template, 900, 600))
+    engine = tracking_engine(capturer, max_matches=2)
+    engine.scan_once(trigger=False)
+
+    # A second occurrence may appear anywhere, so cropping is never used.
+    assert engine.scan_once(trigger=False)[0].rect == (900, 600, 128, 48)
+    assert capturer.regions == [None, None]
+
+
+def test_custom_capture_provider_keeps_receiving_the_configured_region():
+    template = button_image()
+    capture = Mock(return_value=desktop_with(template, 100, 60, size=(300, 500)))
+    engine = VisionEngine([TemplateSpec(image=template, threshold=.95)],
+                          capture_fn=capture)
+    engine.scan_once(trigger=False)
+    engine.scan_once(trigger=False)
+
+    # Background window capture crops itself; it must never be asked for a
+    # sub-rectangle of a window it grabs as a whole.
+    assert capture.call_args_list == [((None,), {}), ((None,), {})]

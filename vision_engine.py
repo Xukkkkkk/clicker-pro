@@ -509,10 +509,19 @@ class ScreenCapturer:
                             monitor = {"left": left, "top": top,
                                        "width": width, "height": height}
                         shot = grabber.grab(monitor)
-                        # mss returns BGRA; OpenCV matching uses BGR.
-                        image = np.asarray(shot, dtype=np.uint8)
-                        if image.ndim == 3 and image.shape[2] >= 3:
-                            image = image[:, :, :3].copy()
+                        # mss returns BGRA.  Wrapping its buffer and letting
+                        # OpenCV drop the alpha channel is several times
+                        # faster than slicing a numpy view and copying it:
+                        # on a 5120x1440 desktop that is ~3 ms instead of
+                        # ~26 ms per frame.
+                        try:
+                            image = np.frombuffer(shot.raw, dtype=np.uint8).reshape(
+                                shot.height, shot.width, 4)
+                            image = cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+                        except (AttributeError, ValueError, TypeError):
+                            image = np.asarray(shot, dtype=np.uint8)
+                            if image.ndim == 3 and image.shape[2] >= 3:
+                                image = image[:, :, :3].copy()
                         return ScreenFrame(
                             image=image,
                             origin_x=int(monitor["left"]),
@@ -646,6 +655,51 @@ def _rect_iou(a: tuple[int, int, int, int],
     return float(inter / union) if union else 0.0
 
 
+# Longest edge of the reduced image used to propose candidate locations.
+# Proposals only have to be roughly right: every candidate is re-checked with
+# original pixels afterwards.  Halving this edge quarters the cost of the
+# scale sweep, which dominates every scan that finds nothing.
+COARSE_SOURCE_EDGE = 640.0
+# One proposal search per ~7% size change instead of one per 2.5% step.  All
+# native sizes inside a winning bucket are still verified individually, so a
+# scale is never skipped -- only the coarse search for it is shared.
+COARSE_SCALE_RATIO = 1.07
+
+
+def _scale_bucket_key(scale: float) -> int:
+    return int(round(math.log(scale) / math.log(COARSE_SCALE_RATIO)))
+
+
+def _build_scale_ladder() -> tuple[dict[int, tuple[float, ...]], tuple[int, ...]]:
+    """Group the 50%-200% native scales into coarse proposal buckets.
+
+    The returned order checks the sizes produced by the usual Windows display
+    scaling factors first, so a rescaled UI is normally found by the very
+    first bucket that is searched.
+    """
+    buckets: dict[int, list[float]] = {}
+    for step in range(20, 81):
+        scale = step / 40.0
+        buckets.setdefault(_scale_bucket_key(scale), []).append(scale)
+    order: list[int] = []
+    for step in (50, 30, 60, 20, 80):
+        key = _scale_bucket_key(step / 40.0)
+        if key not in order:
+            order.append(key)
+    order.extend(key for key in sorted(buckets) if key not in order)
+    return ({key: tuple(values) for key, values in buckets.items()}, tuple(order))
+
+
+SCALE_BUCKETS, SCALE_BUCKET_ORDER = _build_scale_ladder()
+
+
+def _coarse_ratio(source_width: int, source_height: int,
+                  template_width: int, template_height: int) -> float:
+    """Downscale factor used for candidate proposals, never below 12 px."""
+    return min(1.0, max(COARSE_SOURCE_EDGE / max(1, max(source_width, source_height)),
+                        12.0 / max(1, min(template_width, template_height))))
+
+
 @dataclass
 class _PreparedTemplate:
     spec: TemplateSpec
@@ -653,8 +707,19 @@ class _PreparedTemplate:
     width: int
     height: int
     preferred_scale: float = 1.0
+    # Width and height round independently, so some on-screen sizes are not
+    # reachable from any single scale factor.  Keeping the size that actually
+    # matched lets the next scan re-check it directly.
+    preferred_size: Optional[Tuple[int, int]] = None
     scale_cursor: int = 0
     last_rect: Optional[Region] = None
+    sweep_at: float = 0.0
+    # Derived values that only depend on the template pixels.  Recomputing
+    # them per scan cost a few milliseconds on every cycle.
+    gray: Any = field(default=None, repr=False)
+    gray_ndim: int = 0
+    gray_variance: float = -1.0
+    color_variance: float = -1.0
 
 
 class VisionEngine:
@@ -686,6 +751,9 @@ class VisionEngine:
         prefer_mss: bool = True,
         exclude_regions: Optional[Callable[[], Sequence[Region]]] = None,
         immediate_click: bool = False,
+        adaptive_region: bool = True,
+        region_refresh: float = 0.5,
+        sweep_interval: float = 0.4,
     ):
         self.interval = max(0.01, float(interval))
         self.threshold = _validate_threshold(threshold)
@@ -704,6 +772,22 @@ class VisionEngine:
         self.capturer = ScreenCapturer(prefer_mss=prefer_mss)
         self.exclude_regions = exclude_regions
         self.immediate_click = bool(immediate_click)
+        # Grabbing the whole virtual desktop is by far the slowest part of a
+        # scan on a large or multi-monitor setup.  Once every enabled target
+        # has a known position, capture just the area around them and take a
+        # full frame again at least every ``region_refresh`` seconds so a
+        # target that moved or appeared elsewhere is still found quickly.
+        self.adaptive_region = bool(adaptive_region)
+        self.region_refresh = max(0.0, float(region_refresh))
+        # Searching every size from 50% to 200% is only needed until a target
+        # has been seen once.  While scanning, repeat that search at most
+        # every ``sweep_interval`` seconds and spend the frames in between on
+        # the size that already matched, so a target that comes back is acted
+        # on in milliseconds instead of after a full search.  A read-only
+        # ``scan_once(trigger=False)`` always searches everything.
+        self.sweep_interval = max(0.0, float(sweep_interval))
+        self._full_frame_rect: Optional[Region] = None
+        self._full_frame_at = 0.0
         self.last_scan_details: list[dict[str, Any]] = []
         self.last_scan_ms = 0.0
         self.last_capture_ms = 0.0
@@ -909,13 +993,14 @@ class VisionEngine:
         self.last_error = None
         self.last_scan_details = []
         self._scan_images = {}
-        frame = self._capture()
+        with self._lock:
+            templates = list(self._templates)
+        capture_region = self._plan_capture_region(templates)
+        frame = self._capture(capture_region)
         self.last_capture_ms = (time.perf_counter() - scan_started) * 1000
         image = _as_bgr(frame.image, cv2, np)
         excluded = tuple(self.exclude_regions() or ()) if self.exclude_regions else ()
         matches: list[VisionMatch] = []
-        with self._lock:
-            templates = list(self._templates)
         immediate = self.immediate_click and trigger
         ordered = list(enumerate(templates))
         if immediate and ordered:
@@ -954,7 +1039,7 @@ class VisionEngine:
             try:
                 if refresh_frame:
                     capture_started = time.perf_counter()
-                    frame = self._capture()
+                    frame = self._capture(capture_region)
                     image = _as_bgr(frame.image, cv2, np)
                     self.last_capture_ms += (time.perf_counter() - capture_started) * 1000
                     excluded = tuple(self.exclude_regions() or ()) if self.exclude_regions else ()
@@ -984,10 +1069,16 @@ class VisionEngine:
                     source = self._to_gray(source, cv2)
                     template_image = self._to_gray(template_image, cv2)
                 threshold = _validate_threshold(spec.threshold, self.threshold)
+                quick_only = immediate
+                if trigger and not immediate:
+                    now = time.monotonic()
+                    quick_only = now - prepared.sweep_at < self.sweep_interval
+                    if not quick_only:
+                        prepared.sweep_at = now
                 selected = self._match_scaled(
                     source, template_image, prepared, threshold,
                     search_x, search_y, excluded, detail, cv2, np,
-                    quick_only=immediate, maximum=1 if immediate else None,
+                    quick_only=quick_only, maximum=1 if immediate else None,
                 )
                 current_matches = make_matches(selected, spec, search_x, search_y)
                 matches.extend(current_matches)
@@ -1017,15 +1108,14 @@ class VisionEngine:
             index, spec, source, template_image, prepared, threshold, sx, sy, detail = (
                 pending_scales[self._scale_template % len(pending_scales)])
             self._scale_template += 1
-            steps = [50, 30, 60, 20, 80] + [step for step in range(20, 81)
-                                           if step not in {50, 30, 60, 20, 80}]
+            order = SCALE_BUCKET_ORDER
             cursor = prepared.scale_cursor
-            batch = [steps[(cursor + i) % len(steps)] for i in range(6)]
-            prepared.scale_cursor = (cursor + len(batch)) % len(steps)
+            batch = [order[(cursor + i) % len(order)] for i in range(4)]
+            prepared.scale_cursor = (cursor + len(batch)) % len(order)
             try:
                 selected = self._match_scaled(
                     source, template_image, prepared, threshold, sx, sy,
-                    excluded, detail, cv2, np, scale_steps=batch,
+                    excluded, detail, cv2, np, bucket_keys=batch,
                     skip_quick=True, maximum=1,
                 )
                 matches.extend(make_matches(selected, spec, sx, sy))
@@ -1089,11 +1179,19 @@ class VisionEngine:
         return result
 
     @staticmethod
-    def _peak_locations(scores, width, height, threshold, limit, cv2):
+    def _peak_locations(scores, width, height, threshold, limit, cv2, *, minimum=0):
+        """Best candidate locations in a proposal score map.
+
+        ``minimum`` keeps that many peaks even when they score below
+        ``threshold``.  A downscaled proposal of a thin or anti-aliased target
+        can score poorly while the original pixels still match exactly, so the
+        sweep asks for one peak per size regardless and lets the native-pixel
+        verification make the decision.
+        """
         peaks = []
         for _ in range(limit):
             _, score, _, position = cv2.minMaxLoc(scores)
-            if not math.isfinite(score) or score < threshold:
+            if not math.isfinite(score) or (score < threshold and len(peaks) >= minimum):
                 break
             x, y = position
             peaks.append((float(score), x, y))
@@ -1115,22 +1213,44 @@ class VisionEngine:
 
     def _match_scaled(self, source, template, prepared, threshold,
                       origin_x, origin_y, excluded, detail, cv2, np, *,
-                      quick_only=False, scale_steps=None, skip_quick=False,
+                      quick_only=False, bucket_keys=None, skip_quick=False,
                       maximum=None):
         selected = []
         attempted = set()
         maximum = maximum or max(1, int(prepared.spec.max_matches))
         sh, sw = source.shape[:2]
         stop = self.stop_event
-        gray_template = self._to_gray(template, cv2)
-        gray_variance = float(cv2.meanStdDev(gray_template)[1].max())
+        if (prepared.gray is None or prepared.gray_ndim != template.ndim
+                or prepared.gray.shape[:2] != template.shape[:2]):
+            prepared.gray_ndim = int(template.ndim)
+            prepared.gray = self._to_gray(template, cv2)
+            prepared.gray_variance = float(cv2.meanStdDev(prepared.gray)[1].max())
+            prepared.color_variance = (float(cv2.meanStdDev(template)[1].max())
+                                       if template.ndim == 3 else prepared.gray_variance)
+        gray_template = prepared.gray
+        gray_variance = prepared.gray_variance
         color_proposals = (template.ndim == 3 and gray_variance < 1
-                           and float(cv2.meanStdDev(template)[1].max()) >= 1)
+                           and prepared.color_variance >= 1)
         # Downsampling at an odd screen position shifts a small icon by a
         # fraction of a pixel. Proposal scores may be low even for exact
         # native matches, so only original-pixel verification uses threshold.
         rough_threshold = .4 if min(prepared.width, prepared.height) <= 32 else .5
         candidate_limit = max(12, maximum * 4)
+        # The best few near misses of this scan, kept one per location so a
+        # strong false peak elsewhere cannot hide the real target.
+        near: list[tuple[float, Region]] = []
+
+        def remember(score, px, py, tw, th):
+            rect = (int(px), int(py), int(tw), int(th))
+            for index, (previous, other) in enumerate(near):
+                if _rect_iou(rect, other) > .30:
+                    if score > previous:
+                        near[index] = (float(score), rect)
+                        near.sort(key=lambda item: item[0], reverse=True)
+                    return
+            near.append((float(score), rect))
+            near.sort(key=lambda item: item[0], reverse=True)
+            del near[3:]
 
         def verify(resized, scale, x0=0, y0=0, x1=None, y1=None):
             tw, th = resized.shape[1], resized.shape[0]
@@ -1145,6 +1265,7 @@ class VisionEngine:
                 if correlation < threshold:
                     if correlation > detail["score"]:
                         detail.update(score=float(correlation), scale=float(scale))
+                    remember(correlation, local_x+x0, local_y+y0, tw, th)
                     break
                 px, py = local_x+x0, local_y+y0
                 patch = source[py:py+th, px:px+tw]
@@ -1156,27 +1277,76 @@ class VisionEngine:
                 score = min(float(correlation), pixel_score)
                 if score > detail["score"]:
                     detail.update(score=score, scale=float(scale))
+                remember(score, px, py, tw, th)
                 rect = (px, py, tw, th)
                 if score >= threshold and not any(
                         _rect_iou(rect, (sx, sy, w, h)) > .30 for _, sx, sy, w, h in selected):
                     selected.append((score, px, py, tw, th))
                     prepared.preferred_scale = scale
+                    prepared.preferred_size = (tw, th)
                     prepared.last_rect = (origin_x+px, origin_y+py, tw, th)
                 scores[max(0, local_y-th//2):local_y+th//2+1,
                        max(0, local_x-tw//2):local_x+tw//2+1] = -1
                 if len(selected) >= maximum:
                     break
 
-        def attempt(scale, proposals=None, ratio=1.0):
+        def sized(scale, size=None):
+            """Resize the template; ``None`` when that size was already tried."""
+            if size is None:
+                tw = max(2, round(prepared.width * scale))
+                th = max(2, round(prepared.height * scale))
+            else:
+                tw, th = max(2, int(size[0])), max(2, int(size[1]))
+            if (tw, th) in attempted or tw > sw or th > sh:
+                return None, tw, th
+            attempted.add((tw, th))
+            return self._cached_resize(prepared, template, tw, th,
+                                       "gray" if template.ndim == 2 else "color", cv2), tw, th
+
+        def refine():
+            """Retry the best near miss at pixel-accurate template sizes.
+
+            The searched scales step by 2.5%, and width and height round
+            independently, so a target whose real size falls between two
+            steps stays a pixel or two off however finely the scales are
+            spaced.  That is enough to push an otherwise exact match below a
+            strict threshold.  Walking one pixel at a time around the best
+            candidates costs a handful of windowed checks, and the size that
+            succeeds is kept in ``preferred_size`` so later scans skip the
+            search entirely.
+            """
+            aspect = prepared.height / prepared.width
+            # Changing the size by a few pixels barely moves the best
+            # top-left corner, so a tight window keeps each retry cheap.
+            margin = 8
+            # An exploratory batch only searches a few size bands and runs on
+            # every frame, so it refines the single best candidate; a full
+            # sweep can afford to retry the best few locations.
+            for score, (bx, by, bw, bh) in list(near)[:1 if bucket_keys is not None else 3]:
+                if score < .5:
+                    break
+                for dx in (0, 1, -1, 2, -2, 3, -3):
+                    for dy in (0, 1, -1):
+                        if selected or (stop is not None and stop.is_set()):
+                            return
+                        width = bw + dx
+                        height = round(width * aspect) + dy
+                        scale = width / prepared.width
+                        if not (.5 <= scale <= 2.0 and height >= 2):
+                            continue
+                        resized, tw, th = sized(scale, (width, height))
+                        if resized is None:
+                            continue
+                        verify(resized, scale,
+                               max(0, bx-margin), max(0, by-margin),
+                               min(sw, bx+tw+margin), min(sh, by+th+margin))
+
+        def attempt(scale, proposals=None, ratio=1.0, size=None):
             if stop is not None and stop.is_set():
                 return
-            tw = max(2, round(prepared.width * scale))
-            th = max(2, round(prepared.height * scale))
-            if (tw, th) in attempted or tw > sw or th > sh:
+            resized, tw, th = sized(scale, size)
+            if resized is None:
                 return
-            attempted.add((tw, th))
-            resized = self._cached_resize(prepared, template, tw, th,
-                                           "gray" if template.ndim == 2 else "color", cv2)
             if proposals is None:
                 # Revalidate the last location using fresh pixels, never
                 # repeat a cached click. A moved/disappeared target falls
@@ -1190,7 +1360,7 @@ class VisionEngine:
                     if selected:
                         return
                     prepared.last_rect = None
-                ratio = min(1.0, max(800.0/max(sw, sh), 12.0/min(tw, th)))
+                ratio = _coarse_ratio(sw, sh, tw, th)
                 # Very small or isoluminant templates retain their full
                 # colour search; reducing them can erase all useful detail.
                 if ratio == 1 or gray_variance < 1:
@@ -1200,12 +1370,13 @@ class VisionEngine:
                 w, h = max(2, round(tw*ratio)), max(2, round(th*ratio))
                 small_template = self._cached_resize(prepared, gray_template, w, h, "coarse", cv2)
                 scores = self._score_map(small_source, small_template, cv2, np)
+                np.nan_to_num(scores, copy=False, nan=-1.0, posinf=-1.0, neginf=-1.0)
                 small_excluded = [(math.floor((x-origin_x)*ratio), math.floor((y-origin_y)*ratio),
                                    math.ceil(width*ratio), math.ceil(height*ratio))
                                   for x, y, width, height in excluded]
                 self._exclude_scores(scores, w, h, 0, 0, small_excluded)
                 proposals = self._peak_locations(scores, w, h, rough_threshold,
-                                                  candidate_limit, cv2)
+                                                  candidate_limit, cv2, minimum=1)
             margin = max(3, math.ceil(2/ratio))
             for _, sx, sy in proposals:
                 px, py = round(sx/ratio), round(sy/ratio)
@@ -1215,28 +1386,44 @@ class VisionEngine:
                     break
 
         if not skip_quick:
-            attempt(prepared.preferred_scale)
+            # Re-check the exact size that matched last time before anything
+            # else; that is the common case once a target has been located.
+            attempt(prepared.preferred_scale, size=prepared.preferred_size)
             if len(selected) < maximum:
                 attempt(1.0)
         if quick_only or len(selected) >= maximum:
             return selected
 
         # Search 50%-200% in a small image, then verify the eight best coarse
-        # size groups in native-pixel regions using the unchanged threshold.
-        # Keep all native sizes in a group: rounding must not erase a scale.
-        ratio = min(1.0, max(800.0/max(sw, sh), 12.0/min(prepared.width, prepared.height)))
+        # size bands in native-pixel regions using the unchanged threshold.
+        # One proposal search now covers a ~7% band of sizes instead of a
+        # single 2.5% step, which is what makes a scan that finds nothing
+        # cost milliseconds instead of a third of a second.  Every native
+        # size inside a winning band is still verified separately: rounding
+        # must not erase a scale.
+        ratio = _coarse_ratio(sw, sh, prepared.width, prepared.height)
         small_source = self._search_image(source, origin_x, origin_y, ratio, cv2, color=color_proposals)
         proposal_template = template if color_proposals else gray_template
         ranking = []
         groups = {}
-        for step in (scale_steps if scale_steps is not None else range(20, 81)):
-            scale = step / 40.0
-            tw, th = round(prepared.width*scale), round(prepared.height*scale)
-            w, h = max(2, round(tw*ratio)), max(2, round(th*ratio))
-            if tw > sw or th > sh or w > small_source.shape[1] or h > small_source.shape[0]:
+        for key in (bucket_keys if bucket_keys is not None else SCALE_BUCKET_ORDER):
+            members = {}
+            for scale in SCALE_BUCKETS.get(key, ()):
+                tw, th = round(prepared.width*scale), round(prepared.height*scale)
+                if tw > sw or th > sh:
+                    continue
+                members.setdefault((tw, th), scale)
+            if not members:
                 continue
-            members = groups.setdefault((w, h), {})
-            members.setdefault((tw, th), scale)
+            # Propose with the middle of the band so that no member is more
+            # than half a band away from the size actually searched for.
+            centre = min(max(COARSE_SCALE_RATIO ** key, min(members.values())),
+                         max(members.values()))
+            w = max(2, round(prepared.width*centre*ratio))
+            h = max(2, round(prepared.height*centre*ratio))
+            if w > small_source.shape[1] or h > small_source.shape[0]:
+                continue
+            groups.setdefault((w, h), {}).update(members)
         small_excluded = [(math.floor((x-origin_x)*ratio), math.floor((y-origin_y)*ratio),
                            math.ceil(width*ratio), math.ceil(height*ratio))
                           for x, y, width, height in excluded]
@@ -1246,10 +1433,17 @@ class VisionEngine:
             small_template = self._cached_resize(prepared, proposal_template, w, h,
                                                  "coarse-color" if color_proposals else "coarse", cv2)
             scores = self._score_map(small_source, small_template, cv2, np)
+            np.nan_to_num(scores, copy=False, nan=-1.0, posinf=-1.0, neginf=-1.0)
             self._exclude_scores(scores, w, h, 0, 0, small_excluded)
-            peaks = self._peak_locations(scores, w, h, rough_threshold, candidate_limit, cv2)
+            # Keep one peak per size even below the proposal threshold: a
+            # downscaled thin or anti-aliased target can score poorly while
+            # its original pixels still match exactly.  Ranking puts those
+            # last, so they only cost a windowed check when nothing else
+            # scored better.
+            peaks = self._peak_locations(scores, w, h, rough_threshold,
+                                         candidate_limit, cv2, minimum=1)
             if peaks:
-                ranking.append((peaks[0][0], list(members.values()), peaks))
+                ranking.append((peaks[0][0], sorted(members.values()), peaks))
         for _, scales, proposals in sorted(ranking, key=lambda item: item[0], reverse=True)[:8]:
             for scale in scales:
                 attempt(scale, proposals, ratio)
@@ -1257,13 +1451,22 @@ class VisionEngine:
                     break
             if len(selected) >= maximum:
                 break
-        if not attempted and (prepared.width * .5 > sw or prepared.height * .5 > sh):
-            detail["reason"] = "模板比截图大，请检查目标窗口大小"
-        elif float(cv2.meanStdDev(source)[1].max()) < 1:
-            gray_source = self._search_image(source, origin_x, origin_y, 1.0, cv2)
-            minimum, maximum_value, _, _ = cv2.minMaxLoc(gray_source)
-            if maximum_value - minimum < 1:
-                detail["reason"] = "截图为空白或纯色，请确认窗口未最小化且内容已显示"
+        # A near miss is far more likely to be the target at a size between
+        # two searched steps than a different control that happens to be
+        # similar, so spend a few windowed checks before giving up.
+        if not selected and near:
+            refine()
+        if not selected:
+            if not attempted and (prepared.width * .5 > sw or prepared.height * .5 > sh):
+                detail["reason"] = "模板比截图大，请检查目标窗口大小"
+            else:
+                # Inspect the reduced copy the sweep already built.  A
+                # full-resolution statistics pass over a 4K frame cost
+                # milliseconds on every scan, including successful ones.
+                gray_source = self._search_image(source, origin_x, origin_y, ratio, cv2)
+                minimum, maximum_value, _, _ = cv2.minMaxLoc(gray_source)
+                if maximum_value - minimum < 1:
+                    detail["reason"] = "截图为空白或纯色，请确认窗口未最小化且内容已显示"
         return sorted(selected, reverse=True)[:maximum]
 
     def scan_summary(self) -> str:
@@ -1276,11 +1479,21 @@ class VisionEngine:
         width, height = best["frame_size"]
         return (f"最高匹配度 {best['score']:.0%} / 阈值 {best['threshold']:.0%}"
                 f" · 缩放 {best['scale']:.0%} · 截图 {width}×{height}"
+                f" · 截屏 {self.last_capture_ms:.0f} ms"
                 f" · 本轮检测 {self.last_scan_ms:.0f} ms")
 
-    def _capture(self) -> ScreenFrame:
+    def _capture(self, region: Optional[Region] = None) -> ScreenFrame:
         if self.capture_fn is None:
-            return self.capturer.capture(self.region)
+            if region is None:
+                frame = self.capturer.capture(self.region)
+                if self.region is None:
+                    self._full_frame_rect = (
+                        int(frame.origin_x), int(frame.origin_y),
+                        int(frame.image.shape[1]), int(frame.image.shape[0]),
+                    )
+                    self._full_frame_at = time.monotonic()
+                return frame
+            return self.capturer.capture(region)
         try:
             raw = self.capture_fn(self.region)
         except TypeError:
@@ -1303,6 +1516,57 @@ class VisionEngine:
                 origin_x, origin_y = int(raw[1][0]), int(raw[1][1])
         return ScreenFrame(image=image, origin_x=origin_x, origin_y=origin_y,
                            timestamp=time.time())
+
+    def _plan_capture_region(self, templates: Sequence[TemplateSpec]) -> Optional[Region]:
+        """Return a reduced capture rectangle, or ``None`` for a full frame.
+
+        A custom ``capture_fn`` (background window capture) and an explicit
+        ``region`` already limit what is grabbed, so both keep their own
+        behavior.  Targets that may appear more than once, or that carry a
+        region of their own, always get the full frame: a second occurrence
+        can show up anywhere.
+        """
+        if (not self.adaptive_region or self.capture_fn is not None
+                or self.region is not None):
+            return None
+        bounds = self._full_frame_rect
+        if bounds is None or time.monotonic() - self._full_frame_at >= self.region_refresh:
+            return None
+        rects: list[Region] = []
+        with self._lock:
+            for spec in templates:
+                if not spec.enabled:
+                    continue
+                if spec.region is not None or spec.max_matches > 1:
+                    return None
+                prepared = self._prepared.get(id(spec))
+                rect = prepared.last_rect if prepared is not None else None
+                if not rect:
+                    return None
+                rects.append(rect)
+        if not rects:
+            return None
+        left = top = right = bottom = None
+        for x, y, width, height in rects:
+            # Keep enough room around each target that normal movement, and
+            # any size between 50% and 200%, still lands inside the crop.
+            pad = max(96, width, height)
+            left = x - pad if left is None else min(left, x - pad)
+            top = y - pad if top is None else min(top, y - pad)
+            right = x + width + pad if right is None else max(right, x + width + pad)
+            bottom = y + height + pad if bottom is None else max(bottom, y + height + pad)
+        full_left, full_top, full_width, full_height = bounds
+        left = max(full_left, left)
+        top = max(full_top, top)
+        right = min(full_left + full_width, right)
+        bottom = min(full_top + full_height, bottom)
+        width, height = right - left, bottom - top
+        if width <= 0 or height <= 0:
+            return None
+        # A crop that saves almost nothing is not worth the extra bookkeeping.
+        if width * height > full_width * full_height * 0.6:
+            return None
+        return int(left), int(top), int(width), int(height)
 
     @staticmethod
     def _to_gray(image: Any, cv2: Any) -> Any:

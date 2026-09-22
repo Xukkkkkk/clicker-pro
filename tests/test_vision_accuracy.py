@@ -290,3 +290,91 @@ def test_black_template_does_not_match_gray_background():
     frame = np.full((100, 140, 3), 80, dtype=np.uint8)
 
     assert scan_image(template, frame) == []
+
+
+def ui_button():
+    image = np.full((48, 128, 3), (30, 170, 240), dtype=np.uint8)
+    cv2.rectangle(image, (3, 3), (124, 44), (10, 40, 70), 2)
+    cv2.putText(image, "START", (12, 33), cv2.FONT_HERSHEY_SIMPLEX,
+                .8, (250, 250, 250), 2)
+    return image
+
+
+def place(template, scale, x=640, y=390, size=(1080, 1920)):
+    width, height = round(template.shape[1]*scale), round(template.shape[0]*scale)
+    target = cv2.resize(template, (width, height),
+                        interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    frame = np.full((*size, 3), 40, dtype=np.uint8)
+    frame[y:y+height, x:x+width] = target
+    return frame, (x, y, width, height)
+
+
+# 1.19x and 0.57x fall between the searched scale steps, and their width and
+# height round independently: no single scale factor reproduces the on-screen
+# size exactly.  A strict threshold must still recognise them.
+@pytest.mark.parametrize("scale", [.53, .57, .82, .97, 1.03, 1.19, 1.47, 1.94])
+def test_sizes_between_scale_steps_still_match_at_a_strict_threshold(scale):
+    template = ui_button()
+    frame, rect = place(template, scale)
+
+    matches = scan_image(template, frame, threshold=.98)
+
+    assert len(matches) == 1
+    assert matches[0].rect == rect
+    assert matches[0].score >= .98
+
+
+def test_off_step_size_is_remembered_and_skips_the_search_next_scan():
+    template = ui_button()
+    frame, rect = place(template, 1.19)
+    engine = VisionEngine([TemplateSpec(image=template, threshold=.98)],
+                          capture_fn=lambda: frame, adaptive_region=False)
+    assert engine.scan_once(trigger=False)[0].rect == rect
+    calls = []
+    original = engine._score_map
+    engine._score_map = lambda *args: (calls.append(1), original(*args))[1]
+
+    assert engine.scan_once(trigger=False)[0].rect == rect
+    # The exact pixel size that matched is retried first, so a repeat scan
+    # costs a single match instead of another sweep over every size.
+    assert len(calls) == 1
+
+
+def test_proposal_scores_below_the_rough_threshold_still_get_verified():
+    # Reducing a one pixel wide grid destroys it, so the coarse proposal for
+    # this target scores badly while its original pixels match exactly.
+    template = np.full((40, 64, 3), 12, dtype=np.uint8)
+    template[::2, :] = 236
+    template[:, ::2] = 236
+    frame = np.full((1080, 1920, 3), 12, dtype=np.uint8)
+    frame[500:540, 900:964] = template
+
+    matches = scan_image(template, frame, threshold=.98)
+
+    assert len(matches) == 1
+    assert matches[0].rect == (900, 500, 64, 40)
+
+
+def test_running_scan_reuses_the_known_size_while_a_target_is_missing():
+    template = ui_button()
+    found, rect = place(template, 1.5)
+    state = {"frame": found}
+    engine = VisionEngine([TemplateSpec(image=template, threshold=.95, cooldown=0)],
+                          capture_fn=lambda: state["frame"], adaptive_region=False)
+    assert engine.scan_once()[0].rect == rect
+    state["frame"] = np.full_like(found, 40)
+    calls = []
+    original = engine._score_map
+    engine._score_map = lambda *args: (calls.append(1), original(*args))[1]
+
+    assert engine.scan_once() == []
+
+    # Searching every size from 50% to 200% again on each frame costs an
+    # order of magnitude more work than re-checking the size that matched.
+    assert len(calls) <= 10
+    calls.clear()
+    engine.scan_once(trigger=False)
+    assert len(calls) >= 25
+    state["frame"] = found
+
+    assert engine.scan_once()[0].rect == rect

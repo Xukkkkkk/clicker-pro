@@ -206,6 +206,8 @@ class ClickerApp:
         self.record_last_position: Optional[tuple[int, int]] = None
         self.record_session_id = 0
         self.events: list[dict[str, Any]] = []
+        self.record_schemes: dict[str, dict[str, Any]] = {}
+        self.active_record_scheme_name: str = "默认方案"
         self.event_lock = threading.Lock()
         self.background_targets: list[dict[str, Any]] = []
         self._background_capture_job = None
@@ -633,6 +635,50 @@ class ClickerApp:
     def build_record_page(self):
         page = ttk.Frame(self.page_host, style="Page.TFrame")
         self.page_frames["record"] = page
+
+        # Row 1: Scheme Management Toolbar (录制方案栏)
+        scheme_card = ttk.Frame(page, style="Card.TFrame", padding=(14, 12))
+        scheme_card.pack(fill="x", pady=(0, 14))
+
+        scheme_row1 = ttk.Frame(scheme_card, style="CardInner.TFrame")
+        scheme_row1.pack(fill="x")
+        scheme_left = ttk.Frame(scheme_row1, style="CardInner.TFrame")
+        scheme_left.pack(side="left", fill="x", expand=True)
+        ttk.Label(scheme_left, text="鼠标录制方案", style="HeroTitle.TLabel").pack(anchor="w")
+        ttk.Label(scheme_left, text="多方案独立保存、随时切换与重命名 · 灵活管理多套录制动作", style="Hint.TLabel").pack(anchor="w", pady=(2, 0))
+
+        scheme_bar = ttk.Frame(scheme_card, style="CardInner.TFrame")
+        scheme_bar.pack(fill="x", pady=(10, 0))
+        ttk.Label(scheme_bar, text="当前录制方案:", style="Hint.TLabel").pack(side="left", padx=(0, 6))
+
+        self.record_scheme_var = tk.StringVar(value=getattr(self, "active_record_scheme_name", "默认方案"))
+        self.record_scheme_combo = ttk.Combobox(
+            scheme_bar, textvariable=self.record_scheme_var, state="readonly", width=14,
+        )
+        self.record_scheme_combo.pack(side="left", padx=(0, 8))
+        self.record_scheme_combo.bind("<<ComboboxSelected>>", self.select_record_scheme)
+        Tooltip(self.record_scheme_combo, "选择想要执行或编辑的鼠标录制方案")
+
+        add_scheme_btn = ttk.Button(scheme_bar, text="＋ 新建方案", style="Compact.TButton", command=self.add_record_scheme)
+        add_scheme_btn.pack(side="left", padx=(0, 4))
+        Tooltip(add_scheme_btn, "新增一个独立的鼠标录制方案")
+
+        save_as_scheme_btn = ttk.Button(scheme_bar, text="💾 另存为新方案", style="Compact.TButton", command=self.save_record_scheme_as)
+        save_as_scheme_btn.pack(side="left", padx=(0, 4))
+        Tooltip(save_as_scheme_btn, "将当前录制的动作与参数另存为新方案")
+
+        save_cur_scheme_btn = ttk.Button(scheme_bar, text="保存当前", style="Compact.TButton", command=self.save_current_record_scheme)
+        save_cur_scheme_btn.pack(side="left", padx=(0, 4))
+        Tooltip(save_cur_scheme_btn, "保存当前录制方案的修改")
+
+        rename_scheme_btn = ttk.Button(scheme_bar, text="重命名", style="Compact.TButton", command=self.rename_record_scheme)
+        rename_scheme_btn.pack(side="left", padx=(0, 4))
+        Tooltip(rename_scheme_btn, "修改当前录制方案的名称")
+
+        del_scheme_btn = ttk.Button(scheme_bar, text="删除方案", style="Compact.TButton", command=self.delete_record_scheme)
+        del_scheme_btn.pack(side="left")
+        Tooltip(del_scheme_btn, "删除当前录制方案（至少保留一个方案）")
+
         toolbar = ttk.Frame(page, style="Card.TFrame", padding=(0, 12))
         toolbar.pack(fill="x", pady=(0, 14))
         controls = ttk.Frame(toolbar, style="CardInner.TFrame")
@@ -3191,6 +3237,75 @@ class ClickerApp:
         else:
             self.refresh_vision_task_ui()
 
+        # Handle record schemes
+        has_record_schemes = "record_schemes" in data and isinstance(data["record_schemes"], dict)
+        if has_record_schemes:
+            parsed_schemes: dict[str, dict[str, Any]] = {}
+            for s_name, s_val in data["record_schemes"].items():
+                if not isinstance(s_name, str) or not isinstance(s_val, dict):
+                    continue
+                clean_name = s_name.strip()
+                if not clean_name:
+                    continue
+                parsed_schemes[clean_name] = {
+                    "events": self._normalise_recording_events(s_val.get("events", [])),
+                    "include_moves": bool(s_val.get("include_moves", True)),
+                    "speed": str(s_val.get("speed", "1.0x")),
+                    "loops": str(s_val.get("loops", "1")),
+                    "background": bool(s_val.get("background", False)),
+                }
+            if parsed_schemes:
+                self.record_schemes = parsed_schemes
+                active_s = str(data.get("record_active_scheme", "")).strip()
+                if active_s in self.record_schemes:
+                    self.active_record_scheme_name = active_s
+                else:
+                    self.active_record_scheme_name = next(iter(self.record_schemes.keys()))
+                active_scheme_data = self.record_schemes[self.active_record_scheme_name]
+                with self.event_lock:
+                    self.events = list(active_scheme_data.get("events", []))
+                    self.record_session_id += 1
+                if hasattr(self, "record_include_moves_var") and "include_moves" in active_scheme_data:
+                    self.record_include_moves_var.set(bool(active_scheme_data["include_moves"]))
+                if hasattr(self, "speed_var") and "speed" in active_scheme_data:
+                    speed = str(active_scheme_data["speed"])
+                    self.speed_var.set(speed if speed in {"0.5x", "1.0x", "1.5x", "2.0x", "4.0x"} else "1.0x")
+                if hasattr(self, "loop_var") and "loops" in active_scheme_data:
+                    self.loop_var.set(str(active_scheme_data["loops"]))
+                if hasattr(self, "record_background_var") and "background" in active_scheme_data:
+                    self.record_background_var.set(bool(active_scheme_data["background"]))
+                    self.update_record_background_state()
+            elif replace_templates:
+                self.record_schemes = {
+                    "默认方案": {
+                        "events": [],
+                        "include_moves": True,
+                        "speed": "1.0x",
+                        "loops": "1",
+                        "background": False,
+                    }
+                }
+                self.active_record_scheme_name = "默认方案"
+                with self.event_lock:
+                    self.events = []
+                    self.record_session_id += 1
+            self.refresh_record_scheme_ui()
+            self.refresh_event_tree()
+        elif replace_templates:
+            self.record_schemes = {
+                "默认方案": {
+                    "events": [dict(e) for e in getattr(self, "events", [])],
+                    "include_moves": bool(self.record_include_moves_var.get()) if hasattr(self, "record_include_moves_var") else True,
+                    "speed": str(self.speed_var.get()) if hasattr(self, "speed_var") else "1.0x",
+                    "loops": str(self.loop_var.get()) if hasattr(self, "loop_var") else "1",
+                    "background": bool(self.record_background_var.get()) if hasattr(self, "record_background_var") else False,
+                }
+            }
+            self.active_record_scheme_name = "默认方案"
+            self.refresh_record_scheme_ui()
+        else:
+            self.refresh_record_scheme_ui()
+
         return {
             "vision_loaded": len(self.vision_templates),
             "vision_skipped": skipped_templates,
@@ -3266,9 +3381,37 @@ class ClickerApp:
             }
         return result
 
+    def _collect_record_schemes(self) -> dict[str, Any]:
+        """Collect all recording schemes into a serialisable dictionary."""
+        self._sync_current_record_scheme()
+        result: dict[str, Any] = {}
+        for name, scheme_data in getattr(self, "record_schemes", {}).items():
+            if not isinstance(name, str) or not isinstance(scheme_data, dict):
+                continue
+            events = self._normalise_recording_events(scheme_data.get("events", []))
+            result[name] = {
+                "events": events,
+                "include_moves": bool(scheme_data.get("include_moves", True)),
+                "speed": str(scheme_data.get("speed", "1.0x")),
+                "loops": str(scheme_data.get("loops", "1")),
+                "background": bool(scheme_data.get("background", False)),
+            }
+        if not result:
+            with self.event_lock:
+                current_events = self._normalise_recording_events(list(getattr(self, "events", [])))
+            result["默认方案"] = {
+                "events": current_events,
+                "include_moves": bool(self.record_include_moves_var.get()) if hasattr(self, "record_include_moves_var") else True,
+                "speed": str(self.speed_var.get()) if hasattr(self, "speed_var") else "1.0x",
+                "loops": str(self.loop_var.get()) if hasattr(self, "loop_var") else "1",
+                "background": bool(self.record_background_var.get()) if hasattr(self, "record_background_var") else False,
+            }
+        return result
+
     def _collect_config(self) -> dict[str, Any]:
         """Return one canonical settings snapshot for save/export/close."""
         self._sync_current_vision_task()
+        self._sync_current_record_scheme()
         return {
             "schema_version": 4,
             "theme": self.theme_name,
@@ -3285,6 +3428,8 @@ class ClickerApp:
             "record_include_moves": self.record_include_moves_var.get(),
             "record_background": self.record_background_var.get(),
             "speed": self.speed_var.get(), "loops": self.loop_var.get(),
+            "record_active_scheme": getattr(self, "active_record_scheme_name", "默认方案"),
+            "record_schemes": self._collect_record_schemes(),
             "vision_scan_interval": self.vision_scan_var.get(),
             "vision_immediate": self.vision_immediate_var.get(),
             "vision_background": self.vision_background_var.get(),
@@ -3471,6 +3616,18 @@ class ClickerApp:
                     raise ValueError(f"任务 {task_name} 的 templates 必须是数组")
         if "vision_active_task" in data and not isinstance(data["vision_active_task"], str):
             raise ValueError("配置项 vision_active_task 必须是字符串")
+        if "record_schemes" in data:
+            if not isinstance(data["record_schemes"], dict):
+                raise ValueError("配置项 record_schemes 必须是字典")
+            for scheme_name, scheme_dict in data["record_schemes"].items():
+                if not isinstance(scheme_name, str) or not scheme_name.strip():
+                    raise ValueError("方案名称必须是非空字符串")
+                if not isinstance(scheme_dict, dict):
+                    raise ValueError(f"方案 {scheme_name} 必须是对象")
+                if "events" in scheme_dict and not isinstance(scheme_dict["events"], list):
+                    raise ValueError(f"方案 {scheme_name} 的 events 必须是数组")
+        if "record_active_scheme" in data and not isinstance(data["record_active_scheme"], str):
+            raise ValueError("配置项 record_active_scheme 必须是字符串")
 
     @staticmethod
     def _profile_safe_asset_name(original_name: str, index: int,
@@ -3523,6 +3680,18 @@ class ClickerApp:
                 }
                 for t_name, t_data in settings["vision_tasks"].items()
                 if isinstance(t_data, dict)
+            }
+        if "record_schemes" in settings and isinstance(settings["record_schemes"], dict):
+            settings["record_schemes"] = {
+                s_name: {
+                    **s_data,
+                    "events": [
+                        dict(ev) for ev in s_data.get("events", [])
+                        if isinstance(ev, dict)
+                    ]
+                }
+                for s_name, s_data in settings["record_schemes"].items()
+                if isinstance(s_data, dict)
             }
         assets: dict[str, Path] = {}
         source_to_arc: dict[str, str] = {}
@@ -3887,17 +4056,241 @@ class ClickerApp:
         self.hotkey_apply_status.set(f"已导入配置档案：{path.name}{suffix}")
         return True
 
+    def _sync_current_record_scheme(self):
+        """Sync live recording events and settings into the active scheme dictionary."""
+        name = getattr(self, "active_record_scheme_name", "默认方案")
+        if not hasattr(self, "record_schemes") or not isinstance(self.record_schemes, dict):
+            self.record_schemes = {}
+        with getattr(self, "event_lock", threading.Lock()):
+            events_copy = list(getattr(self, "events", []))
+        self.record_schemes[name] = {
+            "events": self._normalise_recording_events(events_copy),
+            "include_moves": bool(self.record_include_moves_var.get()) if hasattr(self, "record_include_moves_var") and hasattr(self.record_include_moves_var, "get") else True,
+            "speed": str(self.speed_var.get()) if hasattr(self, "speed_var") and hasattr(self.speed_var, "get") else "1.0x",
+            "loops": str(self.loop_var.get()) if hasattr(self, "loop_var") and hasattr(self.loop_var, "get") else "1",
+            "background": bool(self.record_background_var.get()) if hasattr(self, "record_background_var") and hasattr(self.record_background_var, "get") else False,
+        }
+
+    def refresh_record_scheme_ui(self):
+        """Refresh scheme combobox values and select the current active scheme."""
+        if not hasattr(self, "record_scheme_combo"):
+            return
+        if not hasattr(self, "record_schemes") or not self.record_schemes:
+            with self.event_lock:
+                current_events = self._normalise_recording_events(list(getattr(self, "events", [])))
+            self.record_schemes = {
+                "默认方案": {
+                    "events": current_events,
+                    "include_moves": bool(self.record_include_moves_var.get()) if hasattr(self, "record_include_moves_var") else True,
+                    "speed": str(self.speed_var.get()) if hasattr(self, "speed_var") else "1.0x",
+                    "loops": str(self.loop_var.get()) if hasattr(self, "loop_var") else "1",
+                    "background": bool(self.record_background_var.get()) if hasattr(self, "record_background_var") else False,
+                }
+            }
+        names = list(self.record_schemes.keys())
+        self.record_scheme_combo["values"] = names
+        if getattr(self, "active_record_scheme_name", "") not in self.record_schemes:
+            self.active_record_scheme_name = names[0]
+        self.record_scheme_var.set(self.active_record_scheme_name)
+
+    def select_record_scheme(self, event=None):
+        """Switch active recording scheme when chosen from dropdown."""
+        selected_name = self.record_scheme_var.get().strip()
+        if not selected_name or selected_name not in self.record_schemes:
+            return
+        if selected_name == getattr(self, "active_record_scheme_name", ""):
+            return
+
+        if self.recording:
+            self.stop_recording()
+        if self.playing:
+            self.stop_playback(wait=True)
+
+        self._sync_current_record_scheme()
+
+        self.active_record_scheme_name = selected_name
+        scheme_data = self.record_schemes[selected_name]
+
+        with self.event_lock:
+            self.events = self._normalise_recording_events(scheme_data.get("events", []))
+            self.record_session_id += 1
+
+        if hasattr(self, "record_include_moves_var") and "include_moves" in scheme_data:
+            self.record_include_moves_var.set(bool(scheme_data["include_moves"]))
+        if hasattr(self, "speed_var") and "speed" in scheme_data:
+            speed = str(scheme_data["speed"])
+            self.speed_var.set(speed if speed in {"0.5x", "1.0x", "1.5x", "2.0x", "4.0x"} else "1.0x")
+        if hasattr(self, "loop_var") and "loops" in scheme_data:
+            self.loop_var.set(str(scheme_data["loops"]))
+        if hasattr(self, "record_background_var") and "background" in scheme_data:
+            self.record_background_var.set(bool(scheme_data["background"]))
+            self.update_record_background_state()
+
+        self.refresh_event_tree()
+        count = len(self.events)
+        self.record_status_var.set(f"已切换到录制方案【{selected_name}】({count} 个动作)")
+        self.set_status(f"已切换录制方案：{selected_name}", "success")
+        self.save_recording()
+        self.save_config()
+
+    def add_record_scheme(self):
+        """Create and switch to a new recording scheme."""
+        default_name = f"方案 {len(self.record_schemes) + 1}"
+        new_name = self._prompt_task_name("新建录制方案", "请输入新方案名称：", default_name)
+        if not new_name:
+            return
+        if new_name in self.record_schemes:
+            messagebox.showwarning("方案已存在", f"方案【{new_name}】已存在，请使用其他名称。")
+            return
+
+        if self.recording:
+            self.stop_recording()
+        if self.playing:
+            self.stop_playback(wait=True)
+
+        self._sync_current_record_scheme()
+
+        copy_current = False
+        if self.events:
+            copy_current = messagebox.askyesno(
+                "继承动作",
+                f"是否将当前方案【{self.active_record_scheme_name}】的鼠标动作复制到新方案？\n选择“是”复制动作，选择“否”创建空白方案。",
+                default="no",
+            )
+
+        events = [dict(item) for item in self.events] if copy_current else []
+        self.record_schemes[new_name] = {
+            "events": events,
+            "include_moves": bool(self.record_include_moves_var.get()) if hasattr(self, "record_include_moves_var") else True,
+            "speed": str(self.speed_var.get()) if hasattr(self, "speed_var") else "1.0x",
+            "loops": str(self.loop_var.get()) if hasattr(self, "loop_var") else "1",
+            "background": bool(self.record_background_var.get()) if hasattr(self, "record_background_var") else False,
+        }
+        self.active_record_scheme_name = new_name
+        with self.event_lock:
+            self.events = events
+            self.record_session_id += 1
+
+        self.refresh_record_scheme_ui()
+        self.refresh_event_tree()
+        self.record_status_var.set(f"已新建方案【{new_name}】" + (f"（复制了 {len(events)} 个动作）" if copy_current else "，可开始录制动作"))
+        self.set_status(f"已新建录制方案：{new_name}", "success")
+        self.save_recording()
+        self.save_config()
+
+    def save_record_scheme_as(self):
+        """Save current events and configuration as a new recording scheme."""
+        default_name = f"{self.active_record_scheme_name}_备份"
+        new_name = self._prompt_task_name("另存为新方案", "请输入另存为的新方案名称：", default_name)
+        if not new_name:
+            return
+        if new_name in self.record_schemes:
+            if not messagebox.askyesno("覆盖方案", f"方案【{new_name}】已存在，是否覆盖？"):
+                return
+
+        self._sync_current_record_scheme()
+
+        with self.event_lock:
+            events_copy = [dict(item) for item in self.events]
+
+        self.record_schemes[new_name] = {
+            "events": events_copy,
+            "include_moves": bool(self.record_include_moves_var.get()) if hasattr(self, "record_include_moves_var") else True,
+            "speed": str(self.speed_var.get()) if hasattr(self, "speed_var") else "1.0x",
+            "loops": str(self.loop_var.get()) if hasattr(self, "loop_var") else "1",
+            "background": bool(self.record_background_var.get()) if hasattr(self, "record_background_var") else False,
+        }
+        self.active_record_scheme_name = new_name
+        self.refresh_record_scheme_ui()
+        self.record_status_var.set(f"已将当前动作另存为方案【{new_name}】（包含 {len(self.events)} 个动作）")
+        self.set_status(f"已另存为新方案：{new_name}", "success")
+        self.save_recording()
+        self.save_config()
+
+    def save_current_record_scheme(self):
+        """Explicitly save the active recording scheme to disk."""
+        self._sync_current_record_scheme()
+        self.save_recording()
+        self.save_config()
+        count = len(self.events)
+        self.record_status_var.set(f"方案【{self.active_record_scheme_name}】保存成功（共 {count} 个动作）")
+        self.set_status(f"方案【{self.active_record_scheme_name}】已保存", "success")
+
+    def rename_record_scheme(self):
+        """Rename the active recording scheme."""
+        current_name = self.active_record_scheme_name
+        new_name = self._prompt_task_name("重命名录制方案", "请输入新的方案名称：", current_name)
+        if not new_name or new_name == current_name:
+            return
+        if new_name in self.record_schemes:
+            messagebox.showwarning("方案已存在", f"方案名称【{new_name}】已存在，请使用其他名称。")
+            return
+
+        self._sync_current_record_scheme()
+        scheme_data = self.record_schemes.pop(current_name)
+        self.record_schemes[new_name] = scheme_data
+        self.active_record_scheme_name = new_name
+        self.refresh_record_scheme_ui()
+        self.record_status_var.set(f"方案【{current_name}】已重命名为【{new_name}】")
+        self.set_status(f"方案已重命名：{new_name}", "success")
+        self.save_recording()
+        self.save_config()
+
+    def delete_record_scheme(self):
+        """Delete the active recording scheme (keeps at least one scheme)."""
+        if len(self.record_schemes) <= 1:
+            messagebox.showinfo("无法删除", "至少需要保留一个录制方案。如需清空动作可点击“清空记录”。")
+            return
+        current_name = self.active_record_scheme_name
+        if not messagebox.askyesno("删除方案", f"确定要删除方案【{current_name}】及其包含的录制动作吗？此操作不可撤销。"):
+            return
+
+        if self.recording:
+            self.stop_recording()
+        if self.playing:
+            self.stop_playback(wait=True)
+
+        del self.record_schemes[current_name]
+        new_active = next(iter(self.record_schemes.keys()))
+        self.active_record_scheme_name = new_active
+        scheme_data = self.record_schemes[new_active]
+
+        with self.event_lock:
+            self.events = self._normalise_recording_events(scheme_data.get("events", []))
+            self.record_session_id += 1
+
+        if hasattr(self, "record_include_moves_var") and "include_moves" in scheme_data:
+            self.record_include_moves_var.set(bool(scheme_data["include_moves"]))
+        if hasattr(self, "speed_var") and "speed" in scheme_data:
+            speed = str(scheme_data["speed"])
+            self.speed_var.set(speed if speed in {"0.5x", "1.0x", "1.5x", "2.0x", "4.0x"} else "1.0x")
+        if hasattr(self, "loop_var") and "loops" in scheme_data:
+            self.loop_var.set(str(scheme_data["loops"]))
+        if hasattr(self, "record_background_var") and "background" in scheme_data:
+            self.record_background_var.set(bool(scheme_data["background"]))
+            self.update_record_background_state()
+
+        self.refresh_record_scheme_ui()
+        self.refresh_event_tree()
+        self.record_status_var.set(f"已删除方案【{current_name}】，已切换到【{new_active}】")
+        self.set_status(f"已删除方案：{current_name}", "neutral")
+        self.save_recording()
+        self.save_config()
+
     def load_recording(self):
         data = self.read_json(RECORD_FILE, None)
         if not isinstance(data, list):
             data = self.read_json(LEGACY_RECORD_FILE, [])
         valid = self._normalise_recording_events(data)
         self.events = valid
+        self._sync_current_record_scheme()
+        self.refresh_record_scheme_ui()
         self.refresh_event_tree()
         if valid:
             self.record_status_var.set(f"已加载 {len(valid)} 个动作")
 
     def save_recording(self) -> bool:
+        self._sync_current_record_scheme()
         with self.event_lock:
             data = list(self.events)
         if not self.write_json(RECORD_FILE, data):
@@ -5142,6 +5535,8 @@ class ClickerApp:
                 pass
         self.record_background_targets = []
         saved = self.save_recording()
+        if hasattr(self, "theme_name"):
+            self.save_config()
         self.record_button.configure(text="●  开始录制")
         # Stopping invalidates queued row callbacks; rebuild from the final
         # snapshot so a quick Stop still shows every recorded action.
@@ -5167,6 +5562,9 @@ class ClickerApp:
             self.record_session_id += 1
         self.event_tree.delete(*self.event_tree.get_children())
         self.write_json(RECORD_FILE, [])
+        self._sync_current_record_scheme()
+        if hasattr(self, "theme_name"):
+            self.save_config()
         self.record_empty_label.place(relx=0.5, rely=0.5, anchor="center")
         self.record_status_var.set("尚未录制动作")
         self.set_status("记录已清空", "neutral")

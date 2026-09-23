@@ -1231,26 +1231,18 @@ class ClickerApp:
         dlg.resizable(False, False)
         dlg.configure(bg=COLORS["window"])
 
-        dlg.geometry("380x150")
-        try:
-            rx = self.root.winfo_rootx() + (self.root.winfo_width() - 380) // 2
-            ry = self.root.winfo_rooty() + (self.root.winfo_height() - 150) // 2
-            dlg.geometry(f"+{max(0, rx)}+{max(0, ry)}")
-        except Exception:
-            pass
+        card = ttk.Frame(dlg, style="Card.TFrame", padding=(20, 16))
+        card.pack(fill="both", expand=True, padx=12, pady=12)
 
-        card = ttk.Frame(dlg, style="Card.TFrame", padding=(18, 14))
-        card.pack(fill="both", expand=True, padx=10, pady=10)
-
-        ttk.Label(card, text=prompt, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Label(card, text=prompt, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 10))
         var = tk.StringVar(value=initial_value)
-        entry = ttk.Entry(card, textvariable=var, width=32, style="Vision.TEntry")
-        entry.pack(fill="x", pady=(0, 12))
+        entry = ttk.Entry(card, textvariable=var, width=34, style="Vision.TEntry")
+        entry.pack(fill="x", pady=(0, 14))
         entry.focus_set()
         entry.selection_range(0, tk.END)
 
         btn_row = ttk.Frame(card, style="CardInner.TFrame")
-        btn_row.pack(fill="x")
+        btn_row.pack(fill="x", pady=(6, 0))
 
         def on_ok(_event=None):
             val = var.get().strip()
@@ -1266,6 +1258,19 @@ class ClickerApp:
 
         dlg.bind("<Return>", on_ok)
         dlg.bind("<Escape>", on_cancel)
+
+        enable_dark_title_bar(dlg)
+        dlg.update_idletasks()
+        req_w = max(420, dlg.winfo_reqwidth() + 24)
+        req_h = max(200, dlg.winfo_reqheight() + 16)
+        dlg.minsize(req_w, req_h)
+        try:
+            rx = self.root.winfo_rootx() + (self.root.winfo_width() - req_w) // 2
+            ry = self.root.winfo_rooty() + (self.root.winfo_height() - req_h) // 2
+            dlg.geometry(f"{req_w}x{req_h}+{max(0, rx)}+{max(0, ry)}")
+        except Exception:
+            dlg.geometry(f"{req_w}x{req_h}")
+
         dlg.grab_set()
         self.root.wait_window(dlg)
         return result[0]

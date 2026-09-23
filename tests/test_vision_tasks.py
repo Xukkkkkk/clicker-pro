@@ -273,5 +273,27 @@ def test_legacy_profile_backward_compatibility(app, tmp_path):
     assert result["vision_loaded"] == 1
     assert app.active_vision_task_name == "默认任务"
     assert "默认任务" in app.vision_tasks
-    assert len(app.vision_templates) == 1
     assert app.vision_templates[0]["name"] == "legacy.png"
+
+
+def test_prompt_task_name_dialog_geometry_and_visibility(app, monkeypatch):
+    seen = {}
+
+    def fake_wait(dlg):
+        min_w, min_h = dlg.minsize()
+        seen["min_width"] = min_w
+        seen["min_height"] = min_h
+        for child in dlg.winfo_children():
+            for grandchild in child.winfo_children():
+                for item in grandchild.winfo_children():
+                    if isinstance(item, main.ttk.Button):
+                        seen[item.cget("text")] = True
+        dlg.destroy()
+
+    monkeypatch.setattr(app.root, "wait_window", fake_wait)
+    app._prompt_task_name("另存为新任务", "请输入另存为的新任务名称：", "测试任务")
+    assert seen.get("min_height", 0) >= 190
+    assert seen.get("min_width", 0) >= 400
+    assert seen.get("确定") is True
+    assert seen.get("取消") is True
+

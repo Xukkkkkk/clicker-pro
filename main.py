@@ -851,13 +851,19 @@ class ClickerApp:
         ttk.Label(toolbar, text="秒", style="Muted.TLabel").pack(side="left")
         self.vision_global_status = tk.StringVar(value="待机")
         ttk.Label(toolbar, textvariable=self.vision_global_status, style="Count.TLabel").pack(side="right")
-        fast_bar = ttk.Frame(page, style="Card.TFrame", padding=(0, 6))
+        fast_bar = ttk.Frame(page, style="Card.TFrame", padding=(10, 8))
         fast_bar.pack(fill="x", pady=(0, 10))
+        self.vision_sequential_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(fast_bar, text="顺序执行", variable=self.vision_sequential_var,
+                        command=self.change_vision_sequential).pack(side="left")
+        ttk.Label(fast_bar, text="按列表从上到下顺序匹配执行，完成当前目标动作后推进至下一步",
+                  style="Hint.TLabel").pack(side="left", padx=(6, 16))
+        ttk.Separator(fast_bar, orient="vertical").pack(side="left", fill="y", padx=(0, 14))
         self.vision_immediate_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(fast_bar, text="命中立即点击", variable=self.vision_immediate_var,
                         command=self.change_vision_immediate).pack(side="left")
-        ttk.Label(fast_bar, text="最快扫描 · 忽略冷却 · 每次命中单击（替代长按/等待等动作）",
-                  style="Hint.TLabel").pack(side="left", padx=(12, 0))
+        ttk.Label(fast_bar, text="最快扫描 · 忽略冷却 · 每次命中单击",
+                  style="Hint.TLabel").pack(side="left", padx=(6, 0))
         # Keep the detailed message in a separate compact status bar.  It is
         # useful when a scan finds nothing or a template cannot be loaded,
         # while the toolbar status remains a short at-a-glance indicator.
@@ -898,17 +904,22 @@ class ClickerApp:
 
         list_card = ttk.Frame(body, style="Card.TFrame", padding=(0, 8, 10, 0))
         list_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        ttk.Label(list_card, text="识别目标", style="CardTitle.TLabel").pack(anchor="w", padx=6, pady=(4, 12))
+        list_header = ttk.Frame(list_card, style="CardInner.TFrame")
+        list_header.pack(fill="x", padx=6, pady=(4, 10))
+        ttk.Label(list_header, text="识别目标", style="CardTitle.TLabel").pack(side="left")
+        ttk.Label(list_header, text="(可拖拽排序)", style="Hint.TLabel").pack(side="left", padx=(6, 0))
+        ttk.Button(list_header, text="▼ 下移", style="Compact.TButton", command=self.move_vision_template_down).pack(side="right")
+        ttk.Button(list_header, text="▲ 上移", style="Compact.TButton", command=self.move_vision_template_up).pack(side="right", padx=(0, 4))
         list_inner = ttk.Frame(list_card, style="CardInner.TFrame")
         list_inner.pack(fill="both", expand=True)
-        columns = ("name", "threshold", "cooldown", "button", "enabled")
+        columns = ("order", "name", "threshold", "cooldown", "button", "enabled")
         self.vision_tree = ttk.Treeview(list_inner, columns=columns, show="headings", selectmode="browse", height=6)
-        labels = {"name": "目标图片", "threshold": "阈值", "cooldown": "冷却", "button": "按键", "enabled": "执行状态"}
-        widths = {"name": 130, "threshold": 56, "cooldown": 62, "button": 56, "enabled": 88}
+        labels = {"order": "序号", "name": "目标图片", "threshold": "阈值", "cooldown": "冷却", "button": "按键", "enabled": "执行状态"}
+        widths = {"order": 44, "name": 120, "threshold": 56, "cooldown": 62, "button": 56, "enabled": 88}
         for col in columns:
             self.vision_tree.heading(col, text=labels[col])
-            self.vision_tree.column(col, width=widths[col], anchor="w", stretch=col == "name")
-        self.vision_tree.configure(displaycolumns=("name", "threshold", "enabled"))
+            self.vision_tree.column(col, width=widths[col], anchor="center" if col == "order" else "w", stretch=col == "name")
+        self.vision_tree.configure(displaycolumns=("order", "name", "threshold", "enabled"))
         vision_scroll = ttk.Scrollbar(list_inner, orient="vertical", command=self.vision_tree.yview)
         self.vision_tree.configure(yscrollcommand=vision_scroll.set)
         vision_scroll.pack(side="right", fill="y")
@@ -922,7 +933,14 @@ class ClickerApp:
         self.vision_tree.bind("<<TreeviewSelect>>", self.on_vision_select)
         self.vision_tree.bind("<Double-1>", self.toggle_selected_vision_template)
         self.vision_tree.bind("<space>", lambda _e: (self.toggle_selected_vision_template(), "break")[1])
-        Tooltip(self.vision_tree, "双击目标行或按空格键可快速切换【启用 / 停用】执行状态")
+        self.vision_tree.bind("<ButtonPress-1>", self._on_vision_tree_press, add="+")
+        self.vision_tree.bind("<B1-Motion>", self._on_vision_tree_motion, add="+")
+        self.vision_tree.bind("<ButtonRelease-1>", self._on_vision_tree_release, add="+")
+        self.vision_tree.bind("<Alt-Up>", lambda _e: (self.move_vision_template_up(), "break")[1])
+        self.vision_tree.bind("<Alt-Down>", lambda _e: (self.move_vision_template_down(), "break")[1])
+        self.vision_tree.bind("<Control-Up>", lambda _e: (self.move_vision_template_up(), "break")[1])
+        self.vision_tree.bind("<Control-Down>", lambda _e: (self.move_vision_template_down(), "break")[1])
+        Tooltip(self.vision_tree, "拖拽目标行或按 Alt+上下方向键可调整执行顺序；双击/空格可切换启用状态")
 
         # Keep row actions close to the target.  A right-click first selects
         # the row under the pointer, while Delete remains local to this
@@ -950,6 +968,13 @@ class ClickerApp:
         )
         self.vision_context_menu.add_command(
             label="查看大图", command=self._open_vision_preview
+        )
+        self.vision_context_menu.add_separator()
+        self.vision_context_menu.add_command(
+            label="▲ 上移目标 (Alt+Up)", command=self.move_vision_template_up
+        )
+        self.vision_context_menu.add_command(
+            label="▼ 下移目标 (Alt+Down)", command=self.move_vision_template_down
         )
         self.vision_context_menu.add_separator()
         self.vision_context_menu.add_command(
@@ -1212,15 +1237,150 @@ class ClickerApp:
             self.vision_empty_label.place_forget()
         else:
             self.vision_empty_label.place(relx=0.5, rely=0.5, anchor="center")
-        for item in self.vision_templates:
+        for idx, item in enumerate(self.vision_templates, 1):
             iid = item["id"]
             self.vision_tree.insert("", "end", iid=iid, values=(
+                str(idx),
                 item.get("name", Path(item.get("path", "")).name),
                 f"{float(item.get('threshold', 0.85)):.2f}",
                 f"{float(item.get('cooldown', 0.60)):.2f}s",
                 item.get("button", "左键"),
                 "✔ 已启用" if item.get("enabled", True) else "✕ 已停用",
             ))
+
+    def _on_vision_tree_press(self, event):
+        item = self.vision_tree.identify_row(event.y)
+        self._drag_start_item = item
+        self._drag_start_y = event.y
+        self._drag_started = False
+
+    def _on_vision_tree_motion(self, event):
+        if not getattr(self, "_drag_start_item", None):
+            return
+        if not getattr(self, "_drag_started", False):
+            if abs(event.y - getattr(self, "_drag_start_y", event.y)) > 6:
+                self._drag_started = True
+                try:
+                    self.vision_tree.configure(cursor="sb_v_double_arrow")
+                except Exception:
+                    pass
+        if getattr(self, "_drag_started", False):
+            target = self.vision_tree.identify_row(event.y)
+            if target and target != self._drag_start_item:
+                target_item = next((it for it in self.vision_templates if it.get("id") == target), None)
+                if target_item:
+                    name = target_item.get("name", "目标")
+                    self.vision_log_var.set(f"拖拽排序：移动到【{name}】所在位置")
+
+    def _on_vision_tree_release(self, event):
+        start_item = getattr(self, "_drag_start_item", None)
+        was_dragging = getattr(self, "_drag_started", False)
+        self._drag_start_item = None
+        self._drag_started = False
+        try:
+            self.vision_tree.configure(cursor="")
+        except Exception:
+            pass
+        if not was_dragging or not start_item:
+            return
+        target = self.vision_tree.identify_row(event.y)
+        children = list(self.vision_tree.get_children())
+        if not children or len(children) <= 1:
+            return
+        if not target:
+            if event.y < 20:
+                target = children[0]
+            else:
+                target = children[-1]
+        if target == start_item:
+            return
+        self._reorder_vision_templates(start_item, target)
+
+    def _reorder_vision_templates(self, source_id: str, target_id: str):
+        if not source_id or not target_id or source_id == target_id:
+            return
+        src_idx = None
+        dst_idx = None
+        for i, item in enumerate(self.vision_templates):
+            if item.get("id") == source_id:
+                src_idx = i
+            if item.get("id") == target_id:
+                dst_idx = i
+        if src_idx is None or dst_idx is None or src_idx == dst_idx:
+            return
+        was_running = self.vision_running
+        if was_running:
+            self.stop_vision()
+        moved_item = self.vision_templates.pop(src_idx)
+        self.vision_templates.insert(dst_idx, moved_item)
+        self.refresh_vision_tree()
+        try:
+            self.vision_tree.selection_set(source_id)
+            self.vision_tree.focus(source_id)
+        except Exception:
+            pass
+        self._sync_current_vision_task()
+        self.save_config()
+        name = moved_item.get("name", "目标")
+        self.vision_log_var.set(f"已调整目标顺序：【{name}】调整至第 {dst_idx + 1} 位")
+        if was_running:
+            self.start_vision()
+
+    def move_vision_template_up(self):
+        sel = self.vision_tree.selection() if hasattr(self, "vision_tree") else ()
+        if not sel:
+            return
+        target_id = sel[0]
+        for idx, item in enumerate(self.vision_templates):
+            if item.get("id") == target_id:
+                if idx > 0:
+                    was_running = self.vision_running
+                    if was_running:
+                        self.stop_vision()
+                    self.vision_templates[idx - 1], self.vision_templates[idx] = (
+                        self.vision_templates[idx], self.vision_templates[idx - 1]
+                    )
+                    self.refresh_vision_tree()
+                    try:
+                        self.vision_tree.selection_set(target_id)
+                        self.vision_tree.focus(target_id)
+                    except Exception:
+                        pass
+                    self._sync_current_vision_task()
+                    self.save_config()
+                    name = item.get("name", "目标")
+                    self.vision_log_var.set(f"已上移目标：【{name}】至第 {idx} 位")
+                    if was_running:
+                        self.start_vision()
+                break
+
+    def move_vision_template_down(self):
+        sel = self.vision_tree.selection() if hasattr(self, "vision_tree") else ()
+        if not sel:
+            return
+        target_id = sel[0]
+        for idx, item in enumerate(self.vision_templates):
+            if item.get("id") == target_id:
+                if idx < len(self.vision_templates) - 1:
+                    was_running = self.vision_running
+                    if was_running:
+                        self.stop_vision()
+                    self.vision_templates[idx + 1], self.vision_templates[idx] = (
+                        self.vision_templates[idx], self.vision_templates[idx + 1]
+                    )
+                    self.refresh_vision_tree()
+                    try:
+                        self.vision_tree.selection_set(target_id)
+                        self.vision_tree.focus(target_id)
+                    except Exception:
+                        pass
+                    self._sync_current_vision_task()
+                    self.save_config()
+                    name = item.get("name", "目标")
+                    self.vision_log_var.set(f"已下移目标：【{name}】至第 {idx + 2} 位")
+                    if was_running:
+                        self.start_vision()
+                break
 
     def _prompt_task_name(self, title: str, prompt: str, initial_value: str = "") -> Optional[str]:
         """Show a styled modal dialog to enter a task name."""
@@ -1283,6 +1443,7 @@ class ClickerApp:
         self.vision_tasks[name] = {
             "templates": [dict(item) for item in getattr(self, "vision_templates", [])],
             "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+            "sequential": bool(self.vision_sequential_var.get()) if hasattr(self, "vision_sequential_var") else False,
             "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
             "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
         }
@@ -1296,6 +1457,7 @@ class ClickerApp:
                 "默认任务": {
                     "templates": [dict(item) for item in getattr(self, "vision_templates", [])],
                     "scan_interval": "0.20",
+                    "sequential": False,
                     "immediate": False,
                     "background": False,
                 }
@@ -1328,6 +1490,8 @@ class ClickerApp:
 
         if hasattr(self, "vision_scan_var") and "scan_interval" in task_data:
             self.vision_scan_var.set(str(task_data["scan_interval"]))
+        if hasattr(self, "vision_sequential_var") and "sequential" in task_data:
+            self.vision_sequential_var.set(bool(task_data["sequential"]))
         if hasattr(self, "vision_immediate_var") and "immediate" in task_data:
             self.vision_immediate_var.set(bool(task_data["immediate"]))
             if hasattr(self, "vision_scan_combo"):
@@ -1385,6 +1549,7 @@ class ClickerApp:
         self.vision_tasks[new_name] = {
             "templates": templates,
             "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+            "sequential": bool(self.vision_sequential_var.get()) if hasattr(self, "vision_sequential_var") else False,
             "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
             "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
         }
@@ -1420,6 +1585,7 @@ class ClickerApp:
         self.vision_tasks[new_name] = {
             "templates": [dict(item) for item in self.vision_templates],
             "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+            "sequential": bool(self.vision_sequential_var.get()) if hasattr(self, "vision_sequential_var") else False,
             "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
             "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
         }
@@ -2371,12 +2537,24 @@ class ClickerApp:
         else:
             self.start_vision()
 
+    def change_vision_sequential(self):
+        was_running = self.vision_running
+        if was_running or self._vision_test_running:
+            self.stop_vision()
+        self._sync_current_vision_task()
+        self.save_config()
+        seq = bool(self.vision_sequential_var.get())
+        self.vision_log_var.set("已开启顺序执行模式：将按列表顺序依次执行目标动作" if seq else "已关闭顺序执行模式：所有启用目标同时扫描")
+        if was_running:
+            self.start_vision()
+
     def change_vision_immediate(self):
         was_running = self.vision_running
         if was_running or self._vision_test_running:
             self.stop_vision()
         self.vision_scan_combo.configure(
             state="disabled" if self.vision_immediate_var.get() else "readonly")
+        self._sync_current_vision_task()
         self.save_config()
         if was_running:
             self.start_vision()
@@ -2649,6 +2827,7 @@ class ClickerApp:
         self._vision_diagnostic_at = 0.0
         self._vision_match_log_at = 0.0
         immediate = bool(self.vision_immediate_var.get())
+        sequential = bool(self.vision_sequential_var.get())
         try:
             self.vision_engines = {}
             self.vision_background_targets = list(targets)
@@ -2658,6 +2837,7 @@ class ClickerApp:
                     engine = VisionEngine(
                         specs, interval=scan_interval, auto_click=False,
                         immediate_click=immediate,
+                        sequential=sequential,
                         capture_fn=lambda _region=None, handle=hwnd: capture_window_client(handle),
                         on_match=lambda result, token=generation, item=target: self.on_vision_match(result, token, item),
                         on_error=lambda error, token=generation: self.on_vision_error(error, token),
@@ -2671,6 +2851,7 @@ class ClickerApp:
                     interval=scan_interval,
                     auto_click=False,
                     immediate_click=immediate,
+                    sequential=sequential,
                     on_match=lambda result, token=generation: self.on_vision_match(result, token),
                     on_error=lambda error, token=generation: self.on_vision_error(error, token),
                     exclude_regions=self._vision_excluded_regions,
@@ -2697,7 +2878,12 @@ class ClickerApp:
             messagebox.showerror("识别启动失败", str(exc))
             return
         self.vision_start_button.configure(text="■  停止识别")
+        status_prefix = ""
+        if sequential:
+            first_name = specs[0].name if specs else "目标"
+            status_prefix = f"顺序 [1/{len(specs)}: {first_name}] · "
         self.vision_global_status.set(
+            status_prefix +
             ("立即点击 · " if immediate else "") +
             (f"后台 {len(targets)} 窗口" if background else f"识别中 · {len(specs)}")
         )
@@ -2772,7 +2958,14 @@ class ClickerApp:
         if self.closing or generation != self.vision_generation or not self.vision_running:
             return
         self.vision_log_var.set(f"未发现目标；{summary}")
-        self.vision_global_status.set("扫描中 · 未命中")
+        if self.vision_engine and getattr(self.vision_engine, "sequential", False):
+            cur = self.vision_engine.current_sequence_spec()
+            cur_name = cur.name if cur else "目标"
+            total = len([s for s in self.vision_engine.templates if s.enabled])
+            step = (self.vision_engine.sequence_step % total) + 1 if total else 1
+            self.vision_global_status.set(f"顺序 [{step}/{total}: {cur_name}] · 扫描中")
+        else:
+            self.vision_global_status.set("扫描中 · 未命中")
 
     def on_vision_match(self, result, generation: Optional[int] = None,
                         background_target: Optional[dict[str, Any]] = None):
@@ -2846,24 +3039,34 @@ class ClickerApp:
             score = float(getattr(result, "score", 0.0))
             action_ms = (time.perf_counter() - action_started) * 1000
             now = time.monotonic()
+            seq_info = ""
+            if engine and getattr(engine, "sequential", False):
+                total = len([s for s in engine.templates if s.enabled])
+                step = (engine.sequence_step % total) + 1 if total else 1
+                seq_info = f"[顺序 {step}/{total}]"
             # Throttle rendering only; the mailbox never waits for Tk.
             if now - self._vision_match_log_at >= 0.15:
                 self._vision_match_log_at = now
                 self._queue_vision_ui("status", self.vision_match_ui, name, score, x, y,
                                       generation, completed, engine.last_scan_ms, action_ms,
-                                      generation=generation)
+                                      seq_info, generation=generation)
         except Exception as exc:
             self.on_vision_error(str(exc), generation)
 
     def vision_match_ui(self, name: str, score: float, x: int, y: int,
                         generation: Optional[int] = None, completed: int = 1,
-                        scan_ms: Optional[float] = None, action_ms: Optional[float] = None):
+                        scan_ms: Optional[float] = None, action_ms: Optional[float] = None,
+                        seq_info: str = ""):
         if self.closing or (generation is not None and generation != self.vision_generation):
             return
         timing = f" · 检测 {scan_ms:.0f} ms / 执行 {action_ms:.0f} ms" if scan_ms is not None and action_ms is not None else ""
-        self.vision_log_var.set(f"已发送 {completed} 次动作：{name} · 置信度 {score:.0%} · ({x}, {y}){timing}")
+        prefix = f"{seq_info} " if seq_info else ""
+        self.vision_log_var.set(f"{prefix}已发送 {completed} 次动作：{name} · 置信度 {score:.0%} · ({x}, {y}){timing}")
         short_name = name if len(name) <= 12 else name[:12] + "…"
-        self.vision_global_status.set(f"命中 · {short_name}")
+        if seq_info:
+            self.vision_global_status.set(f"{seq_info} 命中 · {short_name}")
+        else:
+            self.vision_global_status.set(f"命中 · {short_name}")
 
     def on_vision_error(self, error, generation: Optional[int] = None):
         self._queue_vision_ui("error", self._vision_error_ui, str(error), generation,
@@ -3089,6 +3292,7 @@ class ClickerApp:
             self.speed_var.set(speed if speed in {"0.5x", "1.0x", "1.5x", "2.0x", "4.0x"} else "1.0x")
             self.loop_var.set(str(data.get("loops", self.loop_var.get())))
             self.vision_scan_var.set(str(data.get("vision_scan_interval", self.vision_scan_var.get())))
+            self.vision_sequential_var.set(bool(data.get("vision_sequential", False)))
             self.vision_immediate_var.set(bool(data.get("vision_immediate", False)))
             self.vision_scan_combo.configure(
                 state="disabled" if self.vision_immediate_var.get() else "readonly")
@@ -3182,6 +3386,7 @@ class ClickerApp:
                 parsed_tasks[clean_name] = {
                     "templates": t_templates,
                     "scan_interval": str(t_val.get("scan_interval", data.get("vision_scan_interval", "0.20"))),
+                    "sequential": bool(t_val.get("sequential", data.get("vision_sequential", False))),
                     "immediate": bool(t_val.get("immediate", data.get("vision_immediate", False))),
                     "background": bool(t_val.get("background", data.get("vision_background", False))),
                 }
@@ -3196,6 +3401,8 @@ class ClickerApp:
                 self.vision_templates = [dict(item) for item in active_task_data.get("templates", [])]
                 if hasattr(self, "vision_scan_var") and "scan_interval" in active_task_data:
                     self.vision_scan_var.set(str(active_task_data["scan_interval"]))
+                if hasattr(self, "vision_sequential_var") and "sequential" in active_task_data:
+                    self.vision_sequential_var.set(bool(active_task_data["sequential"]))
                 if hasattr(self, "vision_immediate_var") and "immediate" in active_task_data:
                     self.vision_immediate_var.set(bool(active_task_data["immediate"]))
                     if hasattr(self, "vision_scan_combo"):
@@ -3210,6 +3417,7 @@ class ClickerApp:
                     "默认任务": {
                         "templates": [],
                         "scan_interval": "0.20",
+                        "sequential": False,
                         "immediate": False,
                         "background": False,
                     }
@@ -3227,6 +3435,7 @@ class ClickerApp:
                 "默认任务": {
                     "templates": [dict(item) for item in self.vision_templates],
                     "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+                    "sequential": bool(self.vision_sequential_var.get()) if hasattr(self, "vision_sequential_var") else False,
                     "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
                     "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
                 }
@@ -3240,6 +3449,7 @@ class ClickerApp:
                 "默认任务": {
                     "templates": [],
                     "scan_interval": "0.20",
+                    "sequential": False,
                     "immediate": False,
                     "background": False,
                 }
@@ -3381,6 +3591,7 @@ class ClickerApp:
             result[name] = {
                 "templates": templates,
                 "scan_interval": str(task_data.get("scan_interval", "0.20")),
+                "sequential": bool(task_data.get("sequential", False)),
                 "immediate": bool(task_data.get("immediate", False)),
                 "background": bool(task_data.get("background", False)),
             }
@@ -3388,6 +3599,7 @@ class ClickerApp:
             result["默认任务"] = {
                 "templates": [self._serialise_vision_item(item) for item in self.vision_templates],
                 "scan_interval": self.vision_scan_var.get() if hasattr(self, "vision_scan_var") else "0.20",
+                "sequential": bool(self.vision_sequential_var.get()) if hasattr(self, "vision_sequential_var") else False,
                 "immediate": bool(self.vision_immediate_var.get()) if hasattr(self, "vision_immediate_var") else False,
                 "background": bool(self.vision_background_var.get()) if hasattr(self, "vision_background_var") else False,
             }
@@ -3443,6 +3655,7 @@ class ClickerApp:
             "record_active_scheme": getattr(self, "active_record_scheme_name", "默认方案"),
             "record_schemes": self._collect_record_schemes(),
             "vision_scan_interval": self.vision_scan_var.get(),
+            "vision_sequential": bool(self.vision_sequential_var.get()) if hasattr(self, "vision_sequential_var") else False,
             "vision_immediate": self.vision_immediate_var.get(),
             "vision_background": self.vision_background_var.get(),
             "vision_active_task": getattr(self, "active_vision_task_name", "默认任务"),
@@ -3555,6 +3768,8 @@ class ClickerApp:
         number("run_duration", 0, 86400 * 30)
         integer("loops", 0, 1000000)
         number("vision_scan_interval", 0.03, 60)
+        if "vision_sequential" in data and not isinstance(data["vision_sequential"], bool):
+            raise ValueError("顺序执行设置必须是布尔值")
         if "vision_immediate" in data and not isinstance(data["vision_immediate"], bool):
             raise ValueError("立即点击设置必须是布尔值")
         for key, choices in {

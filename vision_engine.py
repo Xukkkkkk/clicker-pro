@@ -754,6 +754,7 @@ class VisionEngine:
         adaptive_region: bool = True,
         region_refresh: float = 0.5,
         sweep_interval: float = 0.4,
+        sequential: bool = False,
     ):
         self.interval = max(0.01, float(interval))
         self.threshold = _validate_threshold(threshold)
@@ -786,6 +787,8 @@ class VisionEngine:
         # on in milliseconds instead of after a full search.  A read-only
         # ``scan_once(trigger=False)`` always searches everything.
         self.sweep_interval = max(0.0, float(sweep_interval))
+        self.sequential = bool(sequential)
+        self._seq_index = 0
         self._full_frame_rect: Optional[Region] = None
         self._full_frame_at = 0.0
         self.last_scan_details: list[dict[str, Any]] = []
@@ -820,6 +823,30 @@ class VisionEngine:
     def running(self) -> bool:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def sequence_step(self) -> int:
+        """Return the current 0-based sequence index."""
+        with self._lock:
+            return self._seq_index
+
+    @sequence_step.setter
+    def sequence_step(self, value: int) -> None:
+        with self._lock:
+            self._seq_index = max(0, int(value))
+
+    def reset_sequence(self) -> None:
+        """Reset sequence execution step to 0."""
+        with self._lock:
+            self._seq_index = 0
+
+    def current_sequence_spec(self) -> Optional[TemplateSpec]:
+        """Return the template spec for the current sequence step, or None."""
+        with self._lock:
+            enabled = [s for s in self._templates if s.enabled]
+            if not enabled:
+                return None
+            return enabled[self._seq_index % len(enabled)]
 
     @property
     def stop_event(self) -> Optional[threading.Event]:
@@ -923,6 +950,7 @@ class VisionEngine:
             self._image_cache.clear()
             self._image_cache_bytes = 0
             self._last_fired.clear()
+            self._seq_index = 0
 
     def reload_templates(self) -> None:
         """Drop cached decoded images; files are re-read on the next scan."""
@@ -995,17 +1023,31 @@ class VisionEngine:
         self._scan_images = {}
         with self._lock:
             templates = list(self._templates)
-        capture_region = self._plan_capture_region(templates)
+        enabled_specs = [s for s in templates if s.enabled]
+        if self.sequential:
+            if not enabled_specs:
+                self.last_scan_ms = (time.perf_counter() - scan_started) * 1000
+                return []
+            cur_idx = self._seq_index % len(enabled_specs)
+            cur_spec = enabled_specs[cur_idx]
+            capture_region = self._plan_capture_region([cur_spec])
+        else:
+            cur_idx = 0
+            cur_spec = None
+            capture_region = self._plan_capture_region(templates)
         frame = self._capture(capture_region)
         self.last_capture_ms = (time.perf_counter() - scan_started) * 1000
         image = _as_bgr(frame.image, cv2, np)
         excluded = tuple(self.exclude_regions() or ()) if self.exclude_regions else ()
         matches: list[VisionMatch] = []
         immediate = self.immediate_click and trigger
-        ordered = list(enumerate(templates))
-        if immediate and ordered:
-            offset = self._next_template % len(ordered)
-            ordered = ordered[offset:] + ordered[:offset]
+        if self.sequential:
+            ordered = [(templates.index(cur_spec), cur_spec)]
+        else:
+            ordered = list(enumerate(templates))
+            if immediate and ordered:
+                offset = self._next_template % len(ordered)
+                ordered = ordered[offset:] + ordered[:offset]
         pending_scales = []
         dispatch_seconds = 0.0
         refresh_frame = False
@@ -1026,7 +1068,10 @@ class VisionEngine:
             self.last_scan_ms = (time.perf_counter() - scan_started - dispatch_seconds) * 1000
             if trigger:
                 if immediate:
-                    self._trigger(matches, templates)
+                    dispatched = self._trigger(matches, templates)
+                    if self.sequential and dispatched and enabled_specs:
+                        with self._lock:
+                            self._seq_index = (cur_idx + 1) % len(enabled_specs)
                 else:
                     self._notify_scan(matches)
             return matches
@@ -1097,8 +1142,12 @@ class VisionEngine:
                     # this frame for the following template.
                     dispatch_started = time.perf_counter()
                     self.last_scan_ms = (dispatch_started - scan_started - dispatch_seconds) * 1000
-                    refresh_frame = self._trigger(current_matches, templates, notify=False)
+                    dispatched = self._trigger(current_matches, templates, notify=False)
                     dispatch_seconds += time.perf_counter() - dispatch_started
+                    if self.sequential and dispatched and enabled_specs:
+                        with self._lock:
+                            self._seq_index = (cur_idx + 1) % len(enabled_specs)
+                    refresh_frame = dispatched
             except Exception as exc:
                 self._report_error(exc)
         if immediate and pending_scales:
@@ -1477,7 +1526,15 @@ class VisionEngine:
         if best.get("reason"):
             return best["reason"]
         width, height = best["frame_size"]
-        return (f"最高匹配度 {best['score']:.0%} / 阈值 {best['threshold']:.0%}"
+        prefix = ""
+        if self.sequential:
+            with self._lock:
+                enabled = [s for s in self._templates if s.enabled]
+            if enabled:
+                cur_step = (self._seq_index % len(enabled)) + 1
+                name = best.get("name", "目标")
+                prefix = f"[顺序 {cur_step}/{len(enabled)}: {name}] "
+        return (f"{prefix}最高匹配度 {best['score']:.0%} / 阈值 {best['threshold']:.0%}"
                 f" · 缩放 {best['scale']:.0%} · 截图 {width}×{height}"
                 f" · 截屏 {self.last_capture_ms:.0f} ms"
                 f" · 本轮检测 {self.last_scan_ms:.0f} ms")

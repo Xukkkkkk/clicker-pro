@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import math
 import os
 import random
@@ -81,6 +82,22 @@ PROFILE_IMAGE_SUFFIXES = {
 VISION_CLICK_DURATION = 0.04
 LEGACY_CONFIG_FILE = APP_DIR / "clicker_config.json"
 LEGACY_RECORD_FILE = APP_DIR / "clicker_record.json"
+LOG_FILE = DATA_DIR / "clicker.log"
+
+logger = logging.getLogger("ClickerPro")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    try:
+        from logging.handlers import RotatingFileHandler
+        _log_handler = RotatingFileHandler(
+            LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=2, encoding="utf-8"
+        )
+        _log_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        logger.addHandler(_log_handler)
+    except Exception:
+        pass
 
 HOTKEY_DEFAULTS = {
     "toggle": "<f6>",
@@ -881,6 +898,10 @@ class ClickerApp:
             log_bar, text="后台识别", variable=self.vision_background_var,
             command=self.update_vision_background_state,
         ).pack(side="right", padx=(10, 8))
+        ttk.Button(
+            log_bar, text="查看日志", style="Compact.TButton",
+            command=self.open_log_file,
+        ).pack(side="right", padx=(0, 8))
         vision_log_label = ttk.Label(
             log_bar, textvariable=self.vision_log_var, style="VisionLog.TLabel",
             anchor="w", justify="left", wraplength=360,
@@ -2842,6 +2863,7 @@ class ClickerApp:
                         on_match=lambda result, token=generation, item=target: self.on_vision_match(result, token, item),
                         on_error=lambda error, token=generation: self.on_vision_error(error, token),
                         on_scan=lambda matches, token=generation, handle=hwnd: self.on_vision_scan(matches, token, handle),
+                        on_done=lambda token=generation: self.on_vision_done(token),
                     )
                     self.vision_engines[hwnd] = engine
                 self.vision_engine = next(iter(self.vision_engines.values()))
@@ -2856,6 +2878,7 @@ class ClickerApp:
                     on_error=lambda error, token=generation: self.on_vision_error(error, token),
                     exclude_regions=self._vision_excluded_regions,
                     on_scan=lambda matches, token=generation: self.on_vision_scan(matches, token),
+                    on_done=lambda token=generation: self.on_vision_done(token),
                 )
             # Set this before starting the worker: the first scan can happen
             # immediately and should not be discarded by the callback guard.
@@ -2865,6 +2888,10 @@ class ClickerApp:
             engines = list(self.vision_engines.values()) if background else [self.vision_engine]
             for engine in engines:
                 engine.start()
+            logger.info(
+                "start_vision: 启动成功 (generation=%d, 目标数=%d, 后台=%s, 顺序=%s, 极速=%s)",
+                generation, len(specs), background, sequential, immediate,
+            )
         except Exception as exc:
             for engine in self.vision_engines.values():
                 try:
@@ -2875,6 +2902,7 @@ class ClickerApp:
             self.vision_engine = None
             self.vision_running = False
             self._set_vision_preview_hidden(False)
+            logger.error("start_vision: 启动失败: %s", exc, exc_info=True)
             messagebox.showerror("识别启动失败", str(exc))
             return
         self.vision_start_button.configure(text="■  停止识别")
@@ -2889,7 +2917,18 @@ class ClickerApp:
         )
         self.set_status("后台图片识别中" if background else "图片识别中", "success")
 
-    def stop_vision(self):
+    def on_vision_done(self, generation: int):
+        if self.closing or generation != self.vision_generation:
+            return
+        logger.info("VisionEngine 工作线程结束 (generation=%d)", generation)
+        def _sync_done():
+            if not self.closing and generation == self.vision_generation and self.vision_running:
+                logger.warning("VisionEngine 识别线程非预期退出")
+                self.stop_vision(reason="识别线程意外退出")
+        self.safe_after(_sync_done)
+
+    def stop_vision(self, reason: str = "用户停止"):
+        logger.info("stop_vision: 停止图片识别 (原因=%s, generation=%d)", reason, self.vision_generation)
         # Invalidate callbacks immediately, even if a slow screen capture
         # keeps the old worker alive for a short time during its join.
         self.vision_generation += 1
@@ -2911,6 +2950,8 @@ class ClickerApp:
         if hasattr(self, "vision_start_button"):
             self.vision_start_button.configure(text="▶  开始识别")
         self.vision_global_status.set("待机")
+        if hasattr(self, "vision_log_var"):
+            self.vision_log_var.set(f"识别已停止（{reason}）")
         self.set_status("图片识别已停止", "neutral")
 
     def _queue_vision_ui(self, slot: str, callback: Callable, *args,
@@ -3039,6 +3080,10 @@ class ClickerApp:
             score = float(getattr(result, "score", 0.0))
             action_ms = (time.perf_counter() - action_started) * 1000
             now = time.monotonic()
+            logger.info(
+                "on_vision_match: 目标【%s】匹配成功 (得分=%.2f, 坐标=(%d,%d), 完成动作=%d, 耗时=%.1fms)",
+                name, score, x, y, completed, action_ms,
+            )
             seq_info = ""
             if engine and getattr(engine, "sequential", False):
                 total = len([s for s in engine.templates if s.enabled])
@@ -3051,6 +3096,7 @@ class ClickerApp:
                                       generation, completed, engine.last_scan_ms, action_ms,
                                       seq_info, generation=generation)
         except Exception as exc:
+            logger.error("on_vision_match 执行异常: %s", exc, exc_info=True)
             self.on_vision_error(str(exc), generation)
 
     def vision_match_ui(self, name: str, score: float, x: int, y: int,
@@ -3069,6 +3115,7 @@ class ClickerApp:
             self.vision_global_status.set(f"命中 · {short_name}")
 
     def on_vision_error(self, error, generation: Optional[int] = None):
+        logger.error("on_vision_error (generation=%s): %s", generation, error)
         self._queue_vision_ui("error", self._vision_error_ui, str(error), generation,
                               generation=generation)
 
@@ -4589,6 +4636,18 @@ class ClickerApp:
                 state="normal" if self.vision_background_var.get() else "disabled"
             )
 
+    def open_log_file(self):
+        try:
+            if not LOG_FILE.exists():
+                LOG_FILE.touch()
+            if hasattr(os, "startfile"):
+                os.startfile(str(LOG_FILE))
+            else:
+                import subprocess
+                subprocess.Popen(["notepad.exe", str(LOG_FILE)])
+        except Exception as exc:
+            messagebox.showerror("打开日志失败", f"无法打开日志文件：\n{LOG_FILE}\n\n错误信息：{exc}")
+
     def _refresh_background_target_label(self):
         label = getattr(self, "background_target_var", None)
         if label is None:
@@ -5083,7 +5142,7 @@ class ClickerApp:
         callbacks = {
             "toggle": self.toggle_clicking,
             "record": self.toggle_recording,
-            "stop": self.stop_all,
+            "stop": lambda: self.stop_all(caller=f"快捷键 {self.display_hotkey(specs.get('stop', ''))}"),
             "pause": self.toggle_pause,
             "play": self.play_recording,
         }
@@ -5093,12 +5152,12 @@ class ClickerApp:
                     continue
                 keyboard.HotKey.parse(spec)
                 callback = callbacks[name]
-                mapping[spec] = lambda cb=callback: self._hotkey_callback(cb)
-            if "<esc>" not in mapping:
-                mapping["<esc>"] = lambda: self._hotkey_callback(self._emergency_stop)
+                mapping[spec] = lambda cb=callback, n=name, s=spec: self._hotkey_callback(cb, n, s)
             new_listener = keyboard.GlobalHotKeys(mapping)
             new_listener.start()
+            logger.info("全局快捷键已启动: %s", {k: self.display_hotkey(v) for k, v in specs.items() if v})
         except Exception as exc:
+            logger.error("全局快捷键启动失败: %s", exc)
             self.set_status("快捷键格式错误", "danger")
             if self.current_page == "hotkeys":
                 self.hotkey_apply_status.set(f"无法应用：{exc}")
@@ -5134,22 +5193,26 @@ class ClickerApp:
         }
         return bool(tokens.intersection({"ctrl", "control"}) and "v" in tokens)
 
-    def _hotkey_callback(self, callback: Callable):
+    def _hotkey_callback(self, callback: Callable, name: str = "", spec: str = ""):
         if self.closing or time.monotonic() < self.hotkey_ignore_until:
             return
+        hotkey_name = HOTKEY_LABELS.get(name, name) or "快捷键"
+        logger.info("全局快捷键触发: %s (spec=%s)", hotkey_name, spec)
         self.safe_after(callback)
 
     def _emergency_stop(self):
-        """Global emergency stop: Esc stops all running click/automation tasks."""
+        """Emergency stop: Esc stops all running click/automation tasks."""
         if self.running or self.playing or self.vision_running or self.recording:
-            self.stop_all()
+            logger.info("紧急停止触发 (_emergency_stop)")
+            self.stop_all(caller="紧急停止")
 
     def _on_root_escape(self, event=None):
         """Window-level Esc handler: stops running tasks unless capturing a hotkey."""
         if getattr(self, "hotkey_capture_target", None) is not None:
             return
         if self.running or self.playing or self.vision_running or self.recording:
-            self.stop_all()
+            logger.info("窗口按下了Esc键，执行停止全部")
+            self.stop_all(caller="窗口Esc键")
 
     # ------------------------------------------------------------- clicking
     def capture_position(self):
@@ -5993,11 +6056,12 @@ class ClickerApp:
         if wait and worker and worker is not threading.current_thread():
             worker.join(timeout=0.25)
 
-    def stop_all(self):
+    def stop_all(self, caller: str = "停止全部"):
+        logger.info("stop_all 被调用 (来源: %s)", caller)
         self.stop_clicking(wait=True)
         self.stop_playback(wait=True)
         if self.vision_running:
-            self.stop_vision()
+            self.stop_vision(reason=caller)
         if self.recording:
             # Keep the recording's save result visible for the Stop button
             # and F8, especially when the file could not be written.

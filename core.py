@@ -171,21 +171,36 @@ def list_windows(exclude_process_id: Optional[int] = None) -> List[WindowInfo]:
     if _user32 is None:
         raise OSError("window targeting is only supported on Windows")
     windows: List[WindowInfo] = []
-    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, _HWND, ctypes.c_void_p)
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_int, _HWND, ctypes.c_void_p)
 
     def visit(raw_hwnd, _lparam):
         hwnd = int(raw_hwnd or 0)
         if not hwnd or not _user32.IsWindowVisible(hwnd):
-            return True
+            return 1
         info = get_window_info(hwnd)
         if (info is not None and info.title.strip()
                 and info.process_id != exclude_process_id):
             windows.append(info)
-        return True
+        return 1
 
     callback = callback_type(visit)
-    if not _user32.EnumWindows(callback, None):
-        raise ctypes.WinError()
+    if hasattr(ctypes.windll, "kernel32") and hasattr(ctypes.windll.kernel32, "SetLastError"):
+        ctypes.windll.kernel32.SetLastError(0)
+    res = _user32.EnumWindows(callback, None)
+    err = ctypes.windll.kernel32.GetLastError() if hasattr(ctypes.windll, "kernel32") and hasattr(ctypes.windll.kernel32, "GetLastError") else 0
+    if not res and err != 0:
+        raise ctypes.WinError(err)
+    if not windows and hasattr(_user32, "OpenInputDesktop") and hasattr(_user32, "EnumDesktopWindows"):
+        try:
+            hdesk = _user32.OpenInputDesktop(0, False, 0x0100)
+            if hdesk:
+                try:
+                    _user32.EnumDesktopWindows(hdesk, callback, 0)
+                finally:
+                    if hasattr(_user32, "CloseDesktop"):
+                        _user32.CloseDesktop(hdesk)
+        except Exception:
+            pass
     return windows
 
 
@@ -233,7 +248,10 @@ def _window_message_point(hwnd: int, x: int, y: int) -> Tuple[int, int]:
     if not _user32.GetClientRect(hwnd, ctypes.byref(rect)):
         raise ctypes.WinError()
     x, y = int(x), int(y)
-    if x < rect.left or y < rect.top or x >= rect.right or y >= rect.bottom:
+    if rect.right > rect.left and rect.bottom > rect.top:
+        x = max(rect.left, min(rect.right - 1, x))
+        y = max(rect.top, min(rect.bottom - 1, y))
+    elif x < rect.left or y < rect.top or x >= rect.right or y >= rect.bottom:
         raise ValueError(f"client coordinate ({x}, {y}) is outside the target window")
     target, local_x, local_y = _message_target_at(hwnd, x, y)
     packed = ((local_y & 0xFFFF) << 16) | (local_x & 0xFFFF)

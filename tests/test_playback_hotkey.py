@@ -213,3 +213,41 @@ def test_switching_hotkey_target_replaces_cleanly(app):
     assert app.hotkey_specs["record"] == "<f7>"  # 'record' restored
 
 
+def test_start_hotkeys_does_not_register_unconfigured_esc(app, monkeypatch):
+    captured_mapping = {}
+
+    def mock_init(self, mapping):
+        captured_mapping.update(mapping)
+
+    monkeypatch.setattr(main.keyboard.GlobalHotKeys, "__init__", mock_init)
+    app.hotkey_specs["stop"] = "<f8>"
+    assert app.start_hotkeys()
+    assert "<esc>" not in captured_mapping
+    assert "<f8>" in captured_mapping
+
+
+def test_stop_vision_updates_log_with_reason(app):
+    app.vision_log_var.set("旧日志")
+    app.stop_vision(reason="用户测试")
+    assert "用户测试" in app.vision_log_var.get()
+    assert app.status_pill.cget("text").startswith("●  图片识别已停止")
+
+
+def test_stop_all_passes_caller_to_stop_vision(app):
+    app.vision_running = True
+    app.stop_all(caller="快捷键 F8")
+    assert "快捷键 F8" in app.vision_log_var.get()
+    assert not app.vision_running
+
+
+def test_open_log_file(app, tmp_path, monkeypatch):
+    test_log = tmp_path / "test_clicker.log"
+    monkeypatch.setattr(main, "LOG_FILE", test_log)
+    opened = []
+    monkeypatch.setattr(main.os, "startfile", lambda p: opened.append(p), raising=False)
+    app.open_log_file()
+    assert test_log.exists()
+    assert opened == [str(test_log)]
+
+
+
